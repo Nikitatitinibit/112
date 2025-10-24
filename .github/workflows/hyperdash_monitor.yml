@@ -1,0 +1,29 @@
+name: Hyperdash Monitor Clean
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"    # каждые 5 минут
+  workflow_dispatch:          # запуск вручную
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: node:20-bullseye  # используем готовый контейнер Node 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Node version
+        run: |
+          node -v
+          npm -v
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run monitor script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: npm run check
