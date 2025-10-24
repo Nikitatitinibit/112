@@ -17,7 +17,6 @@ jobs:
             chromium-browser \
             libnss3 \
             libxss1 \
-            libasound2 \
             libxrandr2 \
             libatk1.0-0 \
             libatk-bridge2.0-0 \
@@ -35,6 +34,7 @@ jobs:
             xdg-utils \
             wget \
             lsb-release
+          # если бинарь называется /usr/bin/chromium — создаём алиас chromium-browser
           if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
             sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
           fi
