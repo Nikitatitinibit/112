@@ -2,13 +2,13 @@ name: Hyperdash Monitor Clean
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    - cron: "*/5 * * * *"   # каждые 5 минут
+  workflow_dispatch:        # ручной запуск
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    container: node:20-bullseye
+    container: node:20-bullseye  # готовый контейнер Node 20
 
     steps:
       - name: Install system dependencies
@@ -52,5 +52,4 @@ jobs:
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: node check-once.js --no-sandbox
-
+        run: node check-once.js
