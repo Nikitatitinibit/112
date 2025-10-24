@@ -1,0 +1,99 @@
+name: Hyperdash Monitor Final
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hyperdash-monitor
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            chromium-browser \
+            libnss3 \
+            libxss1 \
+            libxrandr2 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libxkbcommon0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libgbm1 \
+            libpango-1.0-0 \
+            libpangocairo-1.0-0 \
+            fonts-liberation \
+            libappindicator3-1 \
+            xdg-utils \
+            wget \
+            lsb-release || true
+          sudo apt-get install -y libasound2t64 || true
+          if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
+            sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies (robust)
+        env:
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+        run: |
+          echo "Node $(node -v), npm $(npm -v)"
+          if [ -f package-lock.json ]; then
+            echo "Trying: npm ci"
+            npm ci --no-audit --no-fund || (
+              echo "npm ci failed → fallback to npm install" &&
+              rm -f package-lock.json &&
+              npm install --no-audit --no-fund
+            )
+          else
+            echo "No lockfile → npm install"
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Run monitor script
+        env:
+          TRADER_URL: "https://hyperdash.info/trader/0xc2a30212a8ddac9e123944d6e29faddce994e5f2"
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+        run: node check-once.js
+
+      - name: Commit state if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # подхватываем разные названия файла состояния
+          for f in last_positions.json state.json; do
+            [ -f "$f" ] && git add "$f"
+          done
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Update positions snapshot [skip ci]"
+            git push
+          else
+            echo "Nothing to commit."
+          fi
