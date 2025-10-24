@@ -3,11 +3,12 @@ name: Hyperdash Monitor
 on:
   schedule:
     - cron: "*/5 * * * *"   # каждые 5 минут
-  workflow_dispatch:        # можно запустить вручную
+  workflow_dispatch:        # запуск вручную из Actions
 
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,6 +17,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Restore state cache
         uses: actions/cache@v4
@@ -24,7 +26,7 @@ jobs:
           key: hyperdash-state
 
       - name: Install deps
-        run: npm ci
+        run: npm install
 
       - name: Run check
         env:
