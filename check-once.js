@@ -1,4 +1,4 @@
-// check-once.js — снимает снапшот с Hyperdash и шлёт уведомления в TG
+// check-once.js — мониторит страницу Hyperdash и шлёт уведомления в Telegram
 
 import fs from "fs";
 import path from "path";
@@ -13,41 +13,33 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
 
-// --- Telegram ---
+// ---- Telegram ---------------------------------------------------------------
 async function sendTelegram(text) {
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text,
-      parse_mode: "Markdown",
-    }),
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "Markdown" }),
   });
 }
 
-// --- State ---
+// ---- State ------------------------------------------------------------------
 function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return { positions: [], trades: [] };
-  }
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); }
+  catch { return { positions: [], trades: [] }; }
 }
-function saveState(s) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
-}
+function saveState(s) { fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
 
 function diff(prevArr, curArr) {
   const prev = new Set(prevArr || []);
   const cur = new Set(curArr || []);
-  const added = [...cur].filter((x) => !prev.has(x));
-  const removed = [...prev].filter((x) => !cur.has(x));
-  return { added, removed };
+  return {
+    added: [...cur].filter(x => !prev.has(x)),
+    removed: [...prev].filter(x => !cur.has(x))
+  };
 }
 
-// --- Grab data from page ---
+// ---- Снятие снапшота со страницы -------------------------------------------
 async function takeSnapshot(browser) {
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -57,8 +49,8 @@ async function takeSnapshot(browser) {
 
   await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
 
-  // даём SPA дорендериться
-  await delay(3000);
+  console.log("⏳ waiting 3s for SPA render…");
+  await delay(3000);                 // <-- вместо page.waitForTimeout
 
   const snap = await page.evaluate(() => {
     const normalize = (s) => s.replace(/\s+/g, " ").trim();
@@ -66,18 +58,15 @@ async function takeSnapshot(browser) {
     const harvest = (root) => {
       if (!root) return [];
       const tbl = Array.from(root.querySelectorAll("tr"))
-        .map((r) =>
+        .map(r =>
           Array.from(r.querySelectorAll("th,td"))
-            .map((td) => normalize(td.innerText))
+            .map(td => normalize(td.innerText))
             .filter(Boolean)
             .join(" | ")
-        )
-        .filter(Boolean);
+        ).filter(Boolean);
 
-      const lst = Array.from(
-        root.querySelectorAll("li, .row, .trade-row, [role='row']")
-      )
-        .map((n) => normalize(n.innerText))
+      const lst = Array.from(root.querySelectorAll("li, .row, .trade-row, [role='row']"))
+        .map(n => normalize(n.innerText))
         .filter(Boolean);
 
       return [...new Set([...tbl, ...lst])];
@@ -85,8 +74,8 @@ async function takeSnapshot(browser) {
 
     const byHeader = (rx) =>
       Array.from(document.querySelectorAll("h1,h2,h3,h4"))
-        .filter((h) => rx.test(h.textContent || ""))
-        .map((h) => h.closest("section") || h.parentElement)
+        .filter(h => rx.test(h.textContent || ""))
+        .map(h => h.closest("section") || h.parentElement)
         .filter(Boolean);
 
     const posRoots = [
@@ -105,7 +94,6 @@ async function takeSnapshot(browser) {
 
     const positions = [...new Set(posRoots.flatMap(harvest))];
     const trades = [...new Set(tradeRoots.flatMap(harvest))];
-
     return { ts: Date.now(), positions, trades };
   });
 
@@ -113,6 +101,7 @@ async function takeSnapshot(browser) {
   return snap;
 }
 
+// ---- Main -------------------------------------------------------------------
 (async () => {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error("No TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in env");
@@ -142,34 +131,19 @@ async function takeSnapshot(browser) {
 
     const blocks = [];
     if (pos.added.length)
-      blocks.push(
-        `✅ *Открыты позиции* (${pos.added.length}):\n` +
-          pos.added.slice(0, 10).map((x) => `• ${x}`).join("\n")
-      );
+      blocks.push(`✅ *Открыты позиции* (${pos.added.length}):\n` + pos.added.slice(0,10).map(x => `• ${x}`).join("\n"));
     if (pos.removed.length)
-      blocks.push(
-        `❌ *Закрыты позиции* (${pos.removed.length}):\n` +
-          pos.removed.slice(0, 10).map((x) => `• ${x}`).join("\n")
-      );
+      blocks.push(`❌ *Закрыты позиции* (${pos.removed.length}):\n` + pos.removed.slice(0,10).map(x => `• ${x}`).join("\n"));
     if (trd.added.length)
-      blocks.push(
-        `📈 *Новые сделки/активности* (${trd.added.length}):\n` +
-          trd.added.slice(0, 10).map((x) => `• ${x}`).join("\n")
-      );
+      blocks.push(`📈 *Новые сделки/активности* (${trd.added.length}):\n` + trd.added.slice(0,10).map(x => `• ${x}`).join("\n"));
 
     if (blocks.length) {
-      await sendTelegram(
-        `HyperDash монитор\nАдрес: ${TRADER_URL}\n\n${blocks.join("\n\n")}`
-      );
+      await sendTelegram(`HyperDash монитор\nАдрес: ${TRADER_URL}\n\n${blocks.join("\n\n")}`);
     } else {
       console.log("No changes.");
     }
 
-    saveState({
-      positions: snap.positions,
-      trades: snap.trades,
-      lastChecked: snap.ts,
-    });
+    saveState({ positions: snap.positions, trades: snap.trades, lastChecked: snap.ts });
   } catch (e) {
     console.error("Error:", e);
     process.exitCode = 1;
@@ -177,3 +151,4 @@ async function takeSnapshot(browser) {
     await browser.close();
   }
 })();
+
