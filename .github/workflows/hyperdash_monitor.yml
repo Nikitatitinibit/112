@@ -33,7 +33,13 @@ jobs:
             fonts-liberation \
             libappindicator3-1 \
             xdg-utils \
-            wget
+            wget \
+            lsb-release
+
+          # Добавим симлинк, если chromium называется иначе
+          if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
+            sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
+          fi
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -55,5 +61,5 @@ jobs:
         run: |
           export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium-browser"
           export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-          echo "Using Chromium path: $PUPPETEER_EXECUTABLE_PATH"
+          echo "🧭 Using Chromium at: $PUPPETEER_EXECUTABLE_PATH"
           node check-once.js
