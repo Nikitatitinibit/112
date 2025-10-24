@@ -1,0 +1,40 @@
+name: Hyperdash Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # каждые 5 минут
+  workflow_dispatch:        # можно запустить вручную
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: hyperdash-state
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run check
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: npm run check
+
+      - name: Save state artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: state
+          path: state.json
+          if-no-files-found: ignore
