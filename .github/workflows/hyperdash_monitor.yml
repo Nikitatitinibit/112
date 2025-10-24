@@ -3,7 +3,7 @@ name: Hyperdash Monitor Clean
 on:
   schedule:
     - cron: "*/5 * * * *"   # каждые 5 минут
-  workflow_dispatch:        # ручной запуск
+  workflow_dispatch:
 
 jobs:
   check:
@@ -14,7 +14,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            chromium \
+            chromium-browser \
             libnss3 \
             libxss1 \
             libasound2 \
@@ -52,6 +52,8 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
-          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-        run: node check-once.js
+        run: |
+          export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium-browser"
+          export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+          echo "Using Chromium path: $PUPPETEER_EXECUTABLE_PATH"
+          node check-once.js
