@@ -5,11 +5,24 @@ on:
     - cron: "*/5 * * * *"   # каждые 5 минут
   workflow_dispatch:
 
+# нужно, чтобы job мог коммитить файл состояния
+permissions:
+  contents: write
+
+# чтобы предыдущий запуск не пересекался со следующим
+concurrency:
+  group: hyperdash-monitor
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -43,25 +56,49 @@ jobs:
             sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
           fi
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
 
       - name: Install dependencies
         run: |
           export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-          npm install
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
       - name: Run monitor script
         env:
+          # URL трейдера — можно заменить на другой при необходимости
+          TRADER_URL: "https://hyperdash.info/trader/0xc2a30212a8ddac9e123944d6e29faddce994e5f2"
+
+          # Подхватываем оба варианта имени токена — какой бы ни использовал скрипт
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          # для puppeteer
+          PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+        run: node check-once.js
+
+      - name: Commit state if changed
         run: |
-          export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium-browser"
-          export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-          echo "🧭 Using Chromium at: $PUPPETEER_EXECUTABLE_PATH"
-          node check-once.js
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # ⚠️ Если твой скрипт пишет другой файл — поменяй имя ниже
+          if [ -f last_positions.json ]; then
+            git add last_positions.json
+          fi
+          if [ -f state.json ]; then
+            git add state.json
+          fi
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Update positions snapshot [skip ci]"
+            git push
+          else
+            echo "Nothing to commit."
+          fi
+
