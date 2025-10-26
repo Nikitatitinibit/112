@@ -2,7 +2,7 @@ name: Hyperdash Monitor Final
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут (UTC)
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -15,13 +15,13 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (Chromium & libs)
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -81,15 +81,14 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-          SIZE_TOL: "0.1"        # порог в монетах
-          SIZE_TOL_REL: "0.005"  # относительный порог (0.5%)
-        run: node check-once.cjs
+        run: node check-once.js
 
       - name: Commit state if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          for f in last_positions.json state.json snapshot.json; do
+          # подхватываем разные названия файла состояния
+          for f in last_positions.json state.json; do
             [ -f "$f" ] && git add "$f"
           done
           if [ -n "$(git status --porcelain)" ]; then
@@ -98,4 +97,3 @@ jobs:
           else
             echo "Nothing to commit."
           fi
-
