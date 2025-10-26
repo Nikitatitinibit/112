@@ -1,152 +1,229 @@
-// check-once.js — монитор Hyperdash → Telegram
+// check-once.js
+// Алерты в Telegram при открытии/закрытии и ИЗМЕНЕНИИ РАЗМЕРА В МОНЕТАХ.
 
-import fs from "fs";
-import path from "path";
-import puppeteer from "puppeteer";
+const fs = require("fs").promises;
+const puppeteer = require("puppeteer");
 
-const TRADER_URL =
-  "https://hyperdash.info/trader/0xc2a30212a8DdAc9e123944d6e29FADdCe994E5f2";
-const STATE_FILE = path.join(process.cwd(), "state.json");
-
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TRADER_URL = process.env.TRADER_URL;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
 
-// простая пауза вместо устаревшего page.waitForTimeout
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const STATE_FILE = process.env.STATE_FILE || "last_positions.json";
 
-// --- Telegram ---
-async function sendTelegram(text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "Markdown" }),
-  });
+// Пороги: абсолютный в монетах и/или относительный (долевая часть)
+const SIZE_TOL = parseFloat(process.env.SIZE_TOL || "0");          // напр. 0.01
+const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0");  // напр. 0.005 (0.5%)
+
+function fmt(n) {
+  if (!isFinite(n)) return String(n);
+  const a = Math.abs(n);
+  if (a >= 1e6) return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  if (a >= 1)   return n.toFixed(4);
+  return n.toPrecision(6);
 }
 
-// --- State ---
-function loadState() {
-  try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); }
-  catch { return { positions: [], trades: [] }; }
-}
-function saveState(s) { fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
-
-function diff(prevArr, curArr) {
-  const prev = new Set(prevArr || []);
-  const cur = new Set(curArr || []);
-  return {
-    added: [...cur].filter(x => !prev.has(x)),
-    removed: [...prev].filter(x => !cur.has(x)),
-  };
-}
-
-// --- Снятие снапшота ---
-async function takeSnapshot(browser) {
-  const page = await browser.newPage();
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
-  );
-  await page.setViewport({ width: 1366, height: 900 });
-
-  await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
-
-  console.log("⏳ waiting 3s for SPA render…");
-  await sleep(3000); // ← вместо page.waitForTimeout
-
-  const snap = await page.evaluate(() => {
-    const normalize = (s) => s.replace(/\s+/g, " ").trim();
-    const harvest = (root) => {
-      if (!root) return [];
-      const tbl = Array.from(root.querySelectorAll("tr"))
-        .map(r =>
-          Array.from(r.querySelectorAll("th,td"))
-            .map(td => normalize(td.innerText))
-            .filter(Boolean)
-            .join(" | ")
-        )
-        .filter(Boolean);
-    const lst = Array.from(root.querySelectorAll("li, .row, .trade-row, [role='row']"))
-        .map(n => normalize(n.innerText))
-        .filter(Boolean);
-      return [...new Set([...tbl, ...lst])];
-    };
-
-    const byHeader = (rx) =>
-      Array.from(document.querySelectorAll("h1,h2,h3,h4"))
-        .filter(h => rx.test(h.textContent || ""))
-        .map(h => h.closest("section") || h.parentElement)
-        .filter(Boolean);
-
-    const posRoots = [
-      document.querySelector("[data-testid*='positions']"),
-      document.querySelector(".open-positions"),
-      document.querySelector("#positions"),
-      ...byHeader(/positions/i),
-    ].filter(Boolean);
-
-    const tradeRoots = [
-      document.querySelector("[data-testid*='trades']"),
-      document.querySelector(".recent-trades,.activity,.trades"),
-      document.querySelector("#trades"),
-      ...byHeader(/(trades|activity|history)/i),
-    ].filter(Boolean);
-
-    const positions = [...new Set(posRoots.flatMap(harvest))];
-    const trades = [...new Set(tradeRoots.flatMap(harvest))];
-    return { ts: Date.now(), positions, trades };
-  });
-
-  await page.close();
-  return snap;
-}
-
-(async () => {
+async function tgSend(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.error("No TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in env");
-    process.exit(1);
+    console.log("[log] Telegram not configured. Message:\n" + text);
+    return;
   }
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  const body = new URLSearchParams({
+    chat_id: TELEGRAM_CHAT_ID,
+    text,
+    disable_web_page_preview: "true"
+  });
+  const res = await fetch(url, { method: "POST", body });
+  if (!res.ok) {
+    console.error("Telegram error:", res.status, await res.text());
+  }
+}
 
-  console.log("🔍 Puppeteer path:", EXEC_PATH);
+async function loadState() {
+  try {
+    const t = await fs.readFile(STATE_FILE, "utf8");
+    return JSON.parse(t);
+  } catch {
+    return { index: {} };
+  }
+}
+async function saveState(state) {
+  await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+}
+
+// --- рекурсивный обход JSON ---
+function* walk(obj) {
+  if (Array.isArray(obj)) {
+    for (const v of obj) yield* walk(v);
+  } else if (obj && typeof obj === "object") {
+    for (const [k, v] of Object.entries(obj)) {
+      yield [k, v];
+      yield* walk(v);
+    }
+  }
+}
+
+// извлекаем сторону
+function pickSide(p) {
+  if (p.side) return String(p.side).toLowerCase();
+  if (typeof p.isLong === "boolean") return p.isLong ? "long" : "short";
+  if (typeof p.long === "boolean") return p.long ? "long" : "short";
+  if (p.positionSide) return String(p.positionSide).toLowerCase();
+  return "unknown";
+}
+
+// ГЛАВНОЕ: выбираем РАЗМЕР В МОНЕТАХ
+function pickCoinSize(p) {
+  // приоритет полей «в монетах»/контрактах
+  const keysPriority = [
+    "szi", "sz", "positionSize", "baseSize", "qty", "contracts", "contractSize", "coinSize"
+  ];
+  for (const k of keysPriority) {
+    if (p[k] != null && isFinite(Number(p[k]))) {
+      return Math.abs(Number(p[k]));
+    }
+  }
+  // Если вдруг есть поле 'size', попробуем взять его только если рядом НЕТ явной USD-стоимости
+  // (то есть с меньшей вероятностью, что это notional в $)
+  if (p.size != null && isFinite(Number(p.size))) {
+    const usdHints = ["usd", "notional", "value"];
+    const hasUsd = Object.keys(p).some(x => usdHints.some(h => x.toLowerCase().includes(h)));
+    if (!hasUsd) return Math.abs(Number(p.size));
+  }
+  return null;
+}
+
+function normalize(list) {
+  const out = [];
+  for (const p of list) {
+    if (!p || typeof p !== "object") continue;
+    const symbol = p.symbol || p.coin || p.asset || p.token || p.name;
+    const side = pickSide(p);
+    const coinSize = pickCoinSize(p);
+    if (!symbol || coinSize == null || coinSize === 0) continue;
+    out.push({ symbol: String(symbol), side, sizeCoin: coinSize });
+  }
+  return out;
+}
+
+function extractPositionsFromNext(json) {
+  const candidates = [];
+  for (const [k, v] of walk(json)) {
+    if (k === "positions" && Array.isArray(v)) candidates.push(v);
+    if (Array.isArray(v) && v.length && v.every(x => typeof x === "object")) {
+      candidates.push(v);
+    }
+  }
+  for (const c of candidates) {
+    const n = normalize(c);
+    if (n.length) return n;
+  }
+  return [];
+}
+
+function toIndex(positions) {
+  const idx = {};
+  for (const p of positions) idx[`${p.symbol}:${p.side}`] = p.sizeCoin;
+  return idx;
+}
+
+function changedEnough(oldV, newV) {
+  const absDelta = Math.abs(newV - oldV);
+  const relDelta = oldV !== 0 ? absDelta / Math.abs(oldV) : Infinity;
+  if (SIZE_TOL > 0 && absDelta > SIZE_TOL) return true;
+  if (SIZE_TOL_REL > 0 && relDelta > SIZE_TOL_REL) return true;
+  // если пороги не заданы — любое изменение
+  if (SIZE_TOL === 0 && SIZE_TOL_REL === 0 && absDelta > 0) return true;
+  return false;
+}
+
+function diff(prevIdx, currIdx) {
+  const opened = [];
+  const closed = [];
+  const resized = [];
+
+  for (const k of Object.keys(currIdx)) {
+    if (!(k in prevIdx)) {
+      opened.push([k, currIdx[k]]);
+    } else if (changedEnough(prevIdx[k], currIdx[k])) {
+      resized.push([k, prevIdx[k], currIdx[k]]);
+    }
+  }
+  for (const k of Object.keys(prevIdx)) {
+    if (!(k in currIdx)) closed.push([k, prevIdx[k]]);
+  }
+  return { opened, closed, resized };
+}
+
+async function fetchPositions() {
+  if (!TRADER_URL) throw new Error("TRADER_URL env is not set");
 
   const browser = await puppeteer.launch({
-    headless: true,
-    executablePath: EXEC_PATH,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--single-process",
-      "--no-zygote",
-    ],
+    headless: "new",
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
-
   try {
-    const prev = loadState();
-    const snap = await takeSnapshot(browser);
+    const page = await browser.newPage();
+    await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
 
-    const pos = diff(prev.positions, snap.positions);
-    const trd = diff(prev.trades, snap.trades);
+    const nextData = await page.evaluate(() => {
+      const el = document.querySelector("#__NEXT_DATA__");
+      return el ? el.textContent : null;
+    });
+    if (!nextData) return [];
 
-    const blocks = [];
-    if (pos.added.length)
-      blocks.push(`✅ *Открыты позиции* (${pos.added.length}):\n` + pos.added.slice(0,10).map(x => `• ${x}`).join("\n"));
-    if (pos.removed.length)
-      blocks.push(`❌ *Закрыты позиции* (${pos.removed.length}):\n` + pos.removed.slice(0,10).map(x => `• ${x}`).join("\n"));
-    if (trd.added.length)
-      blocks.push(`📈 *Новые сделки/активности* (${trd.added.length}):\n` + trd.added.slice(0,10).map(x => `• ${x}`).join("\n"));
-
-    if (blocks.length) {
-      await sendTelegram(`HyperDash монитор\nАдрес: ${TRADER_URL}\n\n${blocks.join("\n\n")}`);
-    } else {
-      console.log("No changes.");
-    }
-
-    saveState({ positions: snap.positions, trades: snap.trades, lastChecked: snap.ts });
-  } catch (e) {
-    console.error("Error:", e);
-    process.exitCode = 1;
+    const json = JSON.parse(nextData);
+    return extractPositionsFromNext(json);
   } finally {
     await browser.close();
   }
-})();
+}
+
+async function main() {
+  const prevState = await loadState();
+  const prevIdx = prevState.index || {};
+
+  const positions = await fetchPositions();
+  const currIdx = toIndex(positions);
+
+  const { opened, closed, resized } = diff(prevIdx, currIdx);
+  if (!opened.length && !closed.length && !resized.length) {
+    console.log("No changes.");
+    return;
+  }
+
+  const parts = [`🔔 HyperDash мониторинг (coin size)\n${TRADER_URL}`];
+  if (opened.length) {
+    parts.push("🟢 ОТКРЫТО:");
+    for (const [k, v] of opened) {
+      const [sym, side] = k.split(":");
+      parts.push(`• ${sym} ${side} — ${fmt(v)} ${sym}`);
+    }
+  }
+  if (closed.length) {
+    parts.push("🔴 ЗАКРЫТО:");
+    for (const [k, v] of closed) {
+      const [sym, side] = k.split(":");
+      parts.push(`• ${sym} ${side} — было ${fmt(v)} ${sym}`);
+    }
+  }
+  if (resized.length) {
+    parts.push("🟨 ИЗМЕНЕНО (по монетам):");
+    for (const [k, oldV, newV] of resized) {
+      const [sym, side] = k.split(":");
+      const d = newV - oldV;
+      const sign = d > 0 ? "+" : "";
+      parts.push(`• ${sym} ${side}: ${fmt(oldV)} → ${fmt(newV)} ${sym} (${sign}${fmt(d)})`);
+    }
+  }
+
+  await tgSend(parts.join("\n"));
+  await saveState({ index: currIdx, fetched_at: Math.floor(Date.now() / 1000) });
+}
+
+main().catch(async (e) => {
+  console.error("Fatal:", e);
+  try { await tgSend(`⚠️ Monitor error: ${e.message}`); } catch {}
+  process.exit(1);
+});
