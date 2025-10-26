@@ -5,11 +5,9 @@ on:
     - cron: "*/5 * * * *"   # каждые 5 минут (UTC)
   workflow_dispatch:
 
-# нужно для автокоммита файла состояния
 permissions:
   contents: write
 
-# чтобы запуски не накладывались
 concurrency:
   group: hyperdash-monitor
   cancel-in-progress: true
@@ -47,9 +45,7 @@ jobs:
             xdg-utils \
             wget \
             lsb-release || true
-          # на новых runner'ах пакет libasound2 переименован
           sudo apt-get install -y libasound2t64 || true
-          # если бинарь называется chromium — делаем алиас как chromium-browser
           if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
             sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
           fi
@@ -79,34 +75,23 @@ jobs:
 
       - name: Run monitor script
         env:
-          # URL отслеживаемого трейдера
           TRADER_URL: "https://hyperdash.info/trader/0xc2a30212a8ddac9e123944d6e29faddce994e5f2"
-
-          # Телеграм-данные из Secrets
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-          # для puppeteer
           PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-
-          # ❗Пороги для триггера по ИЗМЕНЕНИЮ РАЗМЕРА В МОНЕТАХ:
-          # абсолютный (в монетах) и относительный (доля). Сработает, если превышен ЛЮБОЙ.
-          SIZE_TOL: "0.1"        # например: 0.1 BTC/ETH
-          SIZE_TOL_REL: "0.005"  # 0.5% от текущего размера
-        run: node check-once.js
+          SIZE_TOL: "0.1"        # порог в монетах
+          SIZE_TOL_REL: "0.005"  # относительный порог (0.5%)
+        run: node check-once.cjs
 
       - name: Commit state if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # подхватываем возможные имена файла состояния
           for f in last_positions.json state.json snapshot.json; do
             [ -f "$f" ] && git add "$f"
           done
-
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Update positions snapshot [skip ci]"
             git push
