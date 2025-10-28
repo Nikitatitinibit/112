@@ -1,4 +1,4 @@
-nname: Hyperdash Monitor Final
+name: Hyperdash Monitor Final
 
 on:
   schedule:
