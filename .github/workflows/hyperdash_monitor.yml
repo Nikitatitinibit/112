@@ -2,26 +2,22 @@ name: Hyperdash Monitor Final
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"   # каждые 5 минут (UTC)
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: hyperdash-monitor
-  cancel-in-progress: true
-
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Chromium & libs)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -45,7 +41,9 @@ jobs:
             xdg-utils \
             wget \
             lsb-release || true
+          # на новых runner'ах пакет libasound2 переименован
           sudo apt-get install -y libasound2t64 || true
+          # если бинарь называется chromium — сделаем алиас chromium-browser
           if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
             sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
           fi
@@ -83,14 +81,18 @@ jobs:
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
         run: node check-once.js
 
-      - name: Commit state if changed
+      - name: Commit state if changed (force add)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # подхватываем разные названия файла состояния
-          for f in last_positions.json state.json; do
-            [ -f "$f" ] && git add "$f"
+
+          # Форс-добавляем state-файл даже если .gitignore мешает
+          for f in state.json last_positions.json snapshot.json; do
+            if [ -f "$f" ]; then
+              git add -f "$f"
+            fi
           done
+
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Update positions snapshot [skip ci]"
             git push
