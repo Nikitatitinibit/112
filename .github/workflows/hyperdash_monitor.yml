@@ -1,4 +1,4 @@
-name: Hyperdash Monitor Final
+nname: Hyperdash Monitor Final
 
 on:
   schedule:
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0            # нужна полная история для rebase
+          fetch-depth: 0              # полная история нужна для rebase
           persist-credentials: true
 
       - name: Install system dependencies (Chromium & libs)
@@ -44,7 +44,9 @@ jobs:
             xdg-utils \
             wget \
             lsb-release || true
+          # на новых runner'ах пакет libasound2 переименован
           sudo apt-get install -y libasound2t64 || true
+          # если бинарь называется chromium — делаем алиас chromium-browser
           if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
             sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
           fi
@@ -82,25 +84,29 @@ jobs:
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
         run: node check-once.js
 
-      - name: Commit state if changed (force add + rebase)
+      - name: Commit state if changed (force add + rebase autostash)
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # форс-добавляем снапшоты, даже если игнорятся
+          # форс-стейджим снапшоты, даже если они в .gitignore
+          CHANGED=0
           for f in state.json last_positions.json snapshot.json; do
-            [ -f "$f" ] && git add -f "$f"
+            if [ -f "$f" ]; then
+              git add -f "$f" || true
+              CHANGED=1
+            fi
           done
 
-          if [ -n "$(git status --porcelain)" ]; then
+          if [ "$CHANGED" -eq 1 ]; then
             git commit -m "Update positions snapshot [skip ci]" || true
 
-            # подтягиваем свежий main и ребейсим наш коммит
+            # подтягиваем свежий main и ребейсим наш коммит, не теряя локальные правки
             git fetch origin main
-            git pull --rebase origin main
+            git pull --rebase --autostash origin main
 
-            # обычный пуш (fast-forward)
+            # пушим в main
             git push origin HEAD:main
           else
             echo "Nothing to commit."
