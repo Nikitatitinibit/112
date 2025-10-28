@@ -16,6 +16,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # нужна полная история для rebase
+          persist-credentials: true
 
       - name: Install system dependencies (Chromium & libs)
         run: |
@@ -41,9 +44,7 @@ jobs:
             xdg-utils \
             wget \
             lsb-release || true
-          # на новых runner'ах пакет libasound2 переименован
           sudo apt-get install -y libasound2t64 || true
-          # если бинарь называется chromium — сделаем алиас chromium-browser
           if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
             sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
           fi
@@ -81,21 +82,26 @@ jobs:
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
         run: node check-once.js
 
-      - name: Commit state if changed (force add)
+      - name: Commit state if changed (force add + rebase)
         run: |
-          git config user.name "github-actions[bot]"
+          set -e
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Форс-добавляем state-файл даже если .gitignore мешает
+          # форс-добавляем снапшоты, даже если игнорятся
           for f in state.json last_positions.json snapshot.json; do
-            if [ -f "$f" ]; then
-              git add -f "$f"
-            fi
+            [ -f "$f" ] && git add -f "$f"
           done
 
           if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "Update positions snapshot [skip ci]"
-            git push
+            git commit -m "Update positions snapshot [skip ci]" || true
+
+            # подтягиваем свежий main и ребейсим наш коммит
+            git fetch origin main
+            git pull --rebase origin main
+
+            # обычный пуш (fast-forward)
+            git push origin HEAD:main
           else
             echo "Nothing to commit."
           fi
