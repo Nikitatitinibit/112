@@ -82,7 +82,7 @@ jobs:
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           SIZE_TOL: "0.0"        # абсолютный порог изменения размера (в монетах)
           SIZE_TOL_REL: "0.005"  # относительный порог (0.5%)
-          HEARTBEAT_HOURS: "4"   # раз в N часов шлём плановый отчёт
+          HEARTBEAT_HOURS: "0"   # раз в N часов шлём плановый отчёт
         run: node check-once.js
 
       - name: Commit state if changed (force add + rebase autostash)
