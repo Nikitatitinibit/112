@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0              # полная история нужна для rebase
+          fetch-depth: 0
           persist-credentials: true
 
       - name: Install system dependencies (Chromium & libs)
@@ -44,9 +44,7 @@ jobs:
             xdg-utils \
             wget \
             lsb-release || true
-          # на новых runner'ах пакет libasound2 переименован
           sudo apt-get install -y libasound2t64 || true
-          # если бинарь называется chromium — делаем алиас chromium-browser
           if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
             sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
           fi
@@ -82,6 +80,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+          # пороги для алертов размера (в монетах)
+          SIZE_TOL: "0.0"        # абсолютный, напр. 0.1 означает шлём алерт при сдвиге > 0.1 монет
+          SIZE_TOL_REL: "0.005"  # относительный, 0.005 = 0.5% (можешь поставить 0.0 чтобы отключить)
         run: node check-once.js
 
       - name: Commit state if changed (force add + rebase autostash)
@@ -90,9 +91,8 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # форс-стейджим снапшоты, даже если они в .gitignore
           CHANGED=0
-          for f in state.json last_positions.json snapshot.json; do
+          for f in state-keys.json state.json last_positions.json snapshot.json; do
             if [ -f "$f" ]; then
               git add -f "$f" || true
               CHANGED=1
@@ -101,12 +101,8 @@ jobs:
 
           if [ "$CHANGED" -eq 1 ]; then
             git commit -m "Update positions snapshot [skip ci]" || true
-
-            # подтягиваем свежий main и ребейсим наш коммит, не теряя локальные правки
             git fetch origin main
             git pull --rebase --autostash origin main
-
-            # пушим в main
             git push origin HEAD:main
           else
             echo "Nothing to commit."
