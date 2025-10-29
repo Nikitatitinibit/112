@@ -1,8 +1,6 @@
 // check-once.js — HyperDash → Telegram
-// Шлём уведомления:
-// 1) открытие/закрытие позиции (по ключу SYMBOL:SIDE),
-// 2) изменение РАЗМЕРА позиции в МОНЕТАХ (пороги SIZE_TOL / SIZE_TOL_REL),
-// 3) плановый отчёт раз в HEARTBEAT_HOURS часов (всегда).
+// Алерты: открытие/закрытие позиции, изменение размера (в монетах),
+// и плановый отчёт раз в HEARTBEAT_HOURS часов.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -20,8 +18,8 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const EXEC_PATH =
   process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 
-const SIZE_TOL = parseFloat(process.env.SIZE_TOL || "0");          // абсолютный порог
-const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0");  // относительный порог
+const SIZE_TOL = parseFloat(process.env.SIZE_TOL || "0");
+const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0");
 const HEARTBEAT_HOURS = parseFloat(process.env.HEARTBEAT_HOURS || "4");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -55,7 +53,8 @@ function saveState(s) { writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
 function uniq(a){ return [...new Set(a)]; }
 function num(x){
   if (x == null) return null;
-  const n = Number(String(x).replace(/[ ,]/g, ""));
+  // удаляем обычные пробелы, NBSP (U+00A0) и узкие NBSP (U+202F), а также запятые
+  const n = Number(String(x).replace(/[ \u00A0\u202F,]/g, ""));
   return Number.isFinite(n) ? n : null;
 }
 function diffKeys(prevArr, curArr){
@@ -79,7 +78,7 @@ function fmt(n, p = 2){
   return n.toFixed(6);
 }
 
-// ── разбор __NEXT_DATA__ (если есть)
+// ── из __NEXT_DATA__
 function extractFromNextData(json){
   const pos = [];
   function* walk(o){
@@ -125,7 +124,7 @@ function extractFromText(lines){
     if (symbol==="ASSET" || symbol==="TYPE") continue;
     const key = `${symbol}:${side}`;
 
-    const rx = new RegExp(`([0-9][0-9.,\\s]+)\\s+${symbol}\\b`);
+    const rx = new RegExp(`([0-9][0-9.,\\s\\u00A0\\u202F]+)\\s+${symbol}\\b`);
     const mSize = s.match(rx);
     const sizeCoin = mSize ? num(mSize[1]) : null;
 
@@ -136,7 +135,7 @@ function extractFromText(lines){
   return [...map.values()];
 }
 
-// ── основной парсер позиций: 1) таблица, 2) __NEXT_DATA__, 3) текст
+// ── основной парсер позиций
 async function getPositions(browser){
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -146,19 +145,17 @@ async function getPositions(browser){
   await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
   await sleep(2500);
 
-  // 0) Пробуем вытащить прямо из таблицы (Asset / Type / Position Value / Size)
+  // 0) Парсим реальную таблицу (Asset / Type / Position Value / Size)
   const byTable = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
 
     function pickTable() {
-      // Реальные <table>
       for (const t of Array.from(document.querySelectorAll("table"))) {
         const head = norm(t.tHead?.innerText || t.querySelector("thead")?.innerText || "");
         if (/asset/i.test(head) && /type/i.test(head) && /(position\s*value|size)/i.test(head)) {
           return t;
         }
       }
-      // Реактовские таблицы
       for (const t of Array.from(document.querySelectorAll('[role="table"]'))) {
         const head = norm(
           t.querySelector('[role="rowgroup"]')?.innerText ||
@@ -181,20 +178,26 @@ async function getPositions(browser){
       const tds = Array.from(tr.querySelectorAll("td"));
       if (tds.length < 3) continue;
 
-      // Asset
       const assetRaw = norm(tds[0].innerText).toUpperCase();
       const asset = (assetRaw.match(/^([A-Z0-9.\-:]{2,15})/) || [])[1];
       if (!asset) continue;
 
-      // Type
       const typeText = norm(tds[1].innerText).toUpperCase();
       const side = /SHORT/.test(typeText) ? "SHORT" : /LONG/.test(typeText) ? "LONG" : null;
       if (!side) continue;
 
-      // Position Value / Size -> "47,548.42 ETH"
-      const pv = norm(tds[2].innerText).toUpperCase();
-      const m = pv.match(new RegExp(`([0-9][0-9.,\\s]+)\\s+${asset}\\b`));
-      const sizeCoin = m ? Number(m[1].replace(/[ ,]/g, "")) : null;
+      const rowTxt = norm(tr.textContent).toUpperCase();
+      const rx = new RegExp(`([0-9][0-9.,\\s\\u00A0\\u202F]+)\\s*${asset}\\b`);
+
+      let sizeCoin = null;
+      let mRow = rowTxt.match(rx);
+      if (mRow) {
+        sizeCoin = Number(mRow[1].replace(/[ \u00A0\u202F,]/g, ""));
+      } else {
+        const pv = norm(tds[2].innerText).toUpperCase();
+        const m = pv.match(rx);
+        sizeCoin = m ? Number(m[1].replace(/[ \u00A0\u202F,]/g, "")) : null;
+      }
 
       out.push({ key: `${asset}:${side}`, symbol: asset, side, sizeCoin });
     }
@@ -208,16 +211,48 @@ async function getPositions(browser){
     const el = document.querySelector("#__NEXT_DATA__");
     return el ? el.textContent : null;
   });
-
   if (nextTxt) {
     try {
       const json = JSON.parse(nextTxt);
-      const pos = extractFromNextData(json);
+      const pos = (function extractFromNextData(json){
+        const res = [];
+        function* walk(o){
+          if (Array.isArray(o)) for (const v of o) yield* walk(v);
+          else if (o && typeof o === "object") {
+            yield o;
+            for (const v of Object.values(o)) yield* walk(v);
+          }
+        }
+        for (const o of walk(json)){
+          const symbol = o.symbol || o.asset || o.coin || o.name;
+          let side = null;
+          if (typeof o.isLong === "boolean") side = o.isLong ? "LONG" : "SHORT";
+          else if (o.side) side = String(o.side).toUpperCase();
+
+          const sizeCandidates = [
+            o.baseSize, o.qty, o.contracts, o.szi, o.sz, o.positionSize, o.coinSize,
+          ].map(x => {
+            if (x == null) return null;
+            return Number(String(x).replace(/[ \u00A0\u202F,]/g, ""));
+          }).filter(x=>Number.isFinite(x));
+
+          if (symbol && (side==="LONG"||side==="SHORT") &&
+              /^[A-Z0-9.\-:]{2,15}$/.test(String(symbol).toUpperCase())){
+            const key = `${String(symbol).toUpperCase()}:${side}`;
+            const sizeCoin = sizeCandidates.length ? Math.abs(sizeCandidates[0]) : null;
+            res.push({ key, symbol: String(symbol).toUpperCase(), side, sizeCoin });
+          }
+        }
+        const map = new Map();
+        for (const p of res) map.set(p.key, p);
+        return [...map.values()];
+      })(json);
+
       if (pos.length){ await page.close(); return pos; }
     } catch {}
   }
 
-  // 2) Фолбэк по тексту
+  // 2) фолбэк по тексту
   const lines = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
     const roots = [];
