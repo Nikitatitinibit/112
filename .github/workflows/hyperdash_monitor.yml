@@ -80,9 +80,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-          # пороги для алертов размера (в монетах)
-          SIZE_TOL: "0.0"        # абсолютный, напр. 0.1 означает шлём алерт при сдвиге > 0.1 монет
-          SIZE_TOL_REL: "0.005"  # относительный, 0.005 = 0.5% (можешь поставить 0.0 чтобы отключить)
+          SIZE_TOL: "0.0"        # абсолютный порог монет (например 0.1)
+          SIZE_TOL_REL: "0.005"  # относительный порог (0.5%)
+          HEARTBEAT_HOURS: "4"   # плановая сводка раз в N часов
         run: node check-once.js
 
       - name: Commit state if changed (force add + rebase autostash)
