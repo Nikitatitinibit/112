@@ -80,7 +80,7 @@ function fmt(n, p = 2){
 
 // ── из __NEXT_DATA__
 function extractFromNextData(json){
-  const pos = [];
+  const res = [];
   function* walk(o){
     if (Array.isArray(o)) for (const v of o) yield* walk(v);
     else if (o && typeof o === "object") {
@@ -102,11 +102,11 @@ function extractFromNextData(json){
         /^[A-Z0-9.\-:]{2,15}$/.test(String(symbol).toUpperCase())){
       const key = `${String(symbol).toUpperCase()}:${side}`;
       const sizeCoin = sizeCandidates.length ? Math.abs(sizeCandidates[0]) : null;
-      pos.push({ key, symbol: String(symbol).toUpperCase(), side, sizeCoin });
+      res.push({ key, symbol: String(symbol).toUpperCase(), side, sizeCoin });
     }
   }
   const map = new Map();
-  for (const p of pos) map.set(p.key, p);
+  for (const p of res) map.set(p.key, p);
   return [...map.values()];
 }
 
@@ -145,66 +145,104 @@ async function getPositions(browser){
   await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
   await sleep(2500);
 
-  // 0) Парсим реальную таблицу (Asset / Type / Position Value / Size)
+  // 0) Парсим позиционную таблицу (ищем индексы колонок по заголовкам)
   const byTable = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-    function pickTable() {
-      for (const t of Array.from(document.querySelectorAll("table"))) {
-        const head = norm(t.tHead?.innerText || t.querySelector("thead")?.innerText || "");
-        if (/asset/i.test(head) && /type/i.test(head) && /(position\s*value|size)/i.test(head)) {
-          return t;
+    const getAllTexts = (el) => {
+      if (!el) return "";
+      const arr = [el.innerText || "", el.textContent || ""];
+      el.querySelectorAll("[title]").forEach(n => {
+        const t = n.getAttribute("title");
+        if (t) arr.push(t);
+      });
+      return arr.map(norm).filter(Boolean).join(" | ");
+    };
+
+    function findTableAndCols(){
+      const candidates = [
+        ...Array.from(document.querySelectorAll("table")),
+        ...Array.from(document.querySelectorAll('[role="table"]')),
+      ];
+
+      for (const t of candidates){
+        const heads = [
+          ...Array.from(t.querySelectorAll("thead th, thead [role='columnheader']")),
+          ...Array.from(t.querySelectorAll('[role="rowgroup"] [role="columnheader"]')),
+        ].map(el => norm(el.innerText || el.textContent || ""));
+
+        if (!heads.length) continue;
+
+        let idxAsset = -1, idxType = -1, idxPos = -1;
+        heads.forEach((h,i)=>{
+          const hh = h.toLowerCase();
+          if (idxAsset < 0 && /asset/.test(hh)) idxAsset = i;
+          if (idxType  < 0 && /type/.test(hh))  idxType  = i;
+          if (idxPos   < 0 && /(position\s*value|size)/.test(hh)) idxPos = i;
+        });
+        if (idxAsset < 0 || idxType < 0 || idxPos < 0) continue;
+
+        const bodyRows = [
+          ...Array.from(t.querySelectorAll("tbody tr")),
+          ...Array.from(t.querySelectorAll('[role="rowgroup"] [role="row"]')),
+        ];
+        if (!bodyRows.length) continue;
+
+        const rows = [];
+        for (const tr of bodyRows){
+          const cells = [
+            ...Array.from(tr.querySelectorAll("td")),
+            ...Array.from(tr.querySelectorAll('[role="cell"]')),
+          ];
+          if (!cells.length) continue;
+
+          const cellText = (i) => cells[i] ? norm(cells[i].innerText || cells[i].textContent || "") : "";
+          const rowText  = norm(tr.textContent || "");
+
+          // 1) Asset
+          const assetRaw = cellText(idxAsset).toUpperCase();
+          const mA = assetRaw.match(/^([A-Z0-9.\-:]{2,15})/);
+          const asset = mA ? mA[1] : null;
+          if (!asset) continue;
+
+          // 2) Type
+          const sideTxt = cellText(idxType).toUpperCase();
+          const side = /SHORT/.test(sideTxt) ? "SHORT" : (/LONG/.test(sideTxt) ? "LONG" : null);
+          if (!side) continue;
+
+          // 3) Size — по всей строке и в самой ячейке (включая title)
+          const rx = new RegExp(`([0-9][0-9.,\\s\\u00A0\\u202F]+)\\s*${asset}\\b`);
+          let sizeCoin = null;
+
+          let m = rowText.toUpperCase().match(rx);
+          if (!m) {
+            const posCellText = (cells[idxPos] ? getAllTexts(cells[idxPos]) : "").toUpperCase();
+            m = posCellText.match(rx);
+          }
+          if (!m) {
+            const posCellText = (cells[idxPos] ? getAllTexts(cells[idxPos]) : "").toUpperCase();
+            m = posCellText.match(/([0-9][0-9.,\s\u00A0\u202F]+)/);
+          }
+          if (m) {
+            sizeCoin = Number(String(m[1]).replace(/[ \u00A0\u202F,]/g, ""));
+            if (!Number.isFinite(sizeCoin)) sizeCoin = null;
+          }
+
+          rows.push({ key: `${asset}:${side}`, symbol: asset, side, sizeCoin });
         }
-      }
-      for (const t of Array.from(document.querySelectorAll('[role="table"]'))) {
-        const head = norm(
-          t.querySelector('[role="rowgroup"]')?.innerText ||
-          t.querySelector("thead")?.innerText || ""
-        );
-        if (/asset/i.test(head) && /type/i.test(head) && /(position\s*value|size)/i.test(head)) {
-          return t;
-        }
+
+        if (rows.length) return rows;
       }
       return null;
     }
 
-    const tbl = pickTable();
-    if (!tbl) return null;
-
-    const rows = Array.from(tbl.querySelectorAll("tbody tr"));
-    const out = [];
-
-    for (const tr of rows) {
-      const tds = Array.from(tr.querySelectorAll("td"));
-      if (tds.length < 3) continue;
-
-      const assetRaw = norm(tds[0].innerText).toUpperCase();
-      const asset = (assetRaw.match(/^([A-Z0-9.\-:]{2,15})/) || [])[1];
-      if (!asset) continue;
-
-      const typeText = norm(tds[1].innerText).toUpperCase();
-      const side = /SHORT/.test(typeText) ? "SHORT" : /LONG/.test(typeText) ? "LONG" : null;
-      if (!side) continue;
-
-      const rowTxt = norm(tr.textContent).toUpperCase();
-      const rx = new RegExp(`([0-9][0-9.,\\s\\u00A0\\u202F]+)\\s*${asset}\\b`);
-
-      let sizeCoin = null;
-      let mRow = rowTxt.match(rx);
-      if (mRow) {
-        sizeCoin = Number(mRow[1].replace(/[ \u00A0\u202F,]/g, ""));
-      } else {
-        const pv = norm(tds[2].innerText).toUpperCase();
-        const m = pv.match(rx);
-        sizeCoin = m ? Number(m[1].replace(/[ \u00A0\u202F,]/g, "")) : null;
-      }
-
-      out.push({ key: `${asset}:${side}`, symbol: asset, side, sizeCoin });
-    }
-    return out;
+    return findTableAndCols();
   });
 
-  if (byTable && byTable.length) { await page.close(); return byTable; }
+  if (byTable && byTable.length) {
+    await page.close();
+    return byTable;
+  }
 
   // 1) __NEXT_DATA__
   const nextTxt = await page.evaluate(() => {
@@ -214,7 +252,7 @@ async function getPositions(browser){
   if (nextTxt) {
     try {
       const json = JSON.parse(nextTxt);
-      const pos = (function extractFromNextData(json){
+      const pos = (function extract(json){
         const res = [];
         function* walk(o){
           if (Array.isArray(o)) for (const v of o) yield* walk(v);
@@ -229,12 +267,13 @@ async function getPositions(browser){
           if (typeof o.isLong === "boolean") side = o.isLong ? "LONG" : "SHORT";
           else if (o.side) side = String(o.side).toUpperCase();
 
-          const sizeCandidates = [
-            o.baseSize, o.qty, o.contracts, o.szi, o.sz, o.positionSize, o.coinSize,
-          ].map(x => {
-            if (x == null) return null;
-            return Number(String(x).replace(/[ \u00A0\u202F,]/g, ""));
-          }).filter(x=>Number.isFinite(x));
+          const tryNum = (v)=> {
+            if (v==null) return null;
+            const n = Number(String(v).replace(/[ \u00A0\u202F,]/g,""));
+            return Number.isFinite(n) ? n : null;
+          };
+          const sizeCandidates = [o.baseSize, o.qty, o.contracts, o.szi, o.sz, o.positionSize, o.coinSize]
+            .map(tryNum).filter(x=>x!=null);
 
           if (symbol && (side==="LONG"||side==="SHORT") &&
               /^[A-Z0-9.\-:]{2,15}$/.test(String(symbol).toUpperCase())){
@@ -252,7 +291,7 @@ async function getPositions(browser){
     } catch {}
   }
 
-  // 2) фолбэк по тексту
+  // 2) текстовый фолбэк
   const lines = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
     const roots = [];
@@ -271,16 +310,11 @@ async function getPositions(browser){
     const harvest = (root) => {
       if (!root) return [];
       const tbl = Array.from(root.querySelectorAll("tr"))
-        .map((r) =>
-          Array.from(r.querySelectorAll("th,td"))
-            .map((td) => norm(td.innerText))
-            .filter(Boolean)
-            .join(" | ")
-        )
+        .map(r => Array.from(r.querySelectorAll("th,td"))
+          .map(td => norm(td.innerText)).filter(Boolean).join(" | "))
         .filter(Boolean);
       const rows = Array.from(root.querySelectorAll("li,[role='row'],.row"))
-        .map((n) => norm(n.innerText))
-        .filter(Boolean);
+        .map(n => norm(n.innerText)).filter(Boolean);
       return [...new Set([...tbl, ...rows])];
     };
     return [...new Set(roots.filter(Boolean).flatMap(harvest))];
