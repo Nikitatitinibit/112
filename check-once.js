@@ -1,9 +1,8 @@
 // check-once.js — HyperDash → Telegram
-// Триггеры:
-// 1) Открытие/закрытие позиции (по ключу SYMBOL:SIDE)
-// 2) Изменение РАЗМЕРА в монетах (порогами SIZE_TOL / SIZE_TOL_REL)
-// 3) ⏰ Плановый отчёт раз в HEARTBEAT_HOURS часов — присылается ВСЕГДА,
-//    даже если изменений не было. В отчёте показываем текущие позиции с количеством монет.
+// Шлём уведомления:
+// 1) открытие/закрытие позиции (по ключу SYMBOL:SIDE),
+// 2) изменение РАЗМЕРА позиции в МОНЕТАХ (пороги SIZE_TOL / SIZE_TOL_REL),
+// 3) плановый отчёт раз в HEARTBEAT_HOURS часов (всегда).
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -13,7 +12,6 @@ const TRADER_URL =
   process.env.TRADER_URL ||
   "https://hyperdash.info/trader/0xc2a30212a8DdAc9e123944d6e29FADdCe994E5f2";
 
-// состояние: ключи, размеры, последний heartbeat
 const STATE_FILE = path.join(process.cwd(), "state-keys.json");
 
 const TELEGRAM_TOKEN =
@@ -22,11 +20,8 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const EXEC_PATH =
   process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 
-// пороги чувствительности для размера (в монетах)
-const SIZE_TOL = parseFloat(process.env.SIZE_TOL || "0");          // напр. 0.1
-const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0");  // напр. 0.005 (=0.5%)
-
-// период плановой сводки (часы)
+const SIZE_TOL = parseFloat(process.env.SIZE_TOL || "0");          // абсолютный порог
+const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0");  // относительный порог
 const HEARTBEAT_HOURS = parseFloat(process.env.HEARTBEAT_HOURS || "4");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -84,7 +79,7 @@ function fmt(n, p = 2){
   return n.toFixed(6);
 }
 
-// ── из __NEXT_DATA__ достаём symbol/side/sizeCoin
+// ── разбор __NEXT_DATA__ (если есть)
 function extractFromNextData(json){
   const pos = [];
   function* walk(o){
@@ -130,7 +125,7 @@ function extractFromText(lines){
     if (symbol==="ASSET" || symbol==="TYPE") continue;
     const key = `${symbol}:${side}`;
 
-    const rx = new RegExp(`([0-9][0-9., ]+)\\s+${symbol}\\b`);
+    const rx = new RegExp(`([0-9][0-9.,\\s]+)\\s+${symbol}\\b`);
     const mSize = s.match(rx);
     const sizeCoin = mSize ? num(mSize[1]) : null;
 
@@ -141,6 +136,7 @@ function extractFromText(lines){
   return [...map.values()];
 }
 
+// ── основной парсер позиций: 1) таблица, 2) __NEXT_DATA__, 3) текст
 async function getPositions(browser){
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -150,19 +146,78 @@ async function getPositions(browser){
   await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
   await sleep(2500);
 
+  // 0) Пробуем вытащить прямо из таблицы (Asset / Type / Position Value / Size)
+  const byTable = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+
+    function pickTable() {
+      // Реальные <table>
+      for (const t of Array.from(document.querySelectorAll("table"))) {
+        const head = norm(t.tHead?.innerText || t.querySelector("thead")?.innerText || "");
+        if (/asset/i.test(head) && /type/i.test(head) && /(position\s*value|size)/i.test(head)) {
+          return t;
+        }
+      }
+      // Реактовские таблицы
+      for (const t of Array.from(document.querySelectorAll('[role="table"]'))) {
+        const head = norm(
+          t.querySelector('[role="rowgroup"]')?.innerText ||
+          t.querySelector("thead")?.innerText || ""
+        );
+        if (/asset/i.test(head) && /type/i.test(head) && /(position\s*value|size)/i.test(head)) {
+          return t;
+        }
+      }
+      return null;
+    }
+
+    const tbl = pickTable();
+    if (!tbl) return null;
+
+    const rows = Array.from(tbl.querySelectorAll("tbody tr"));
+    const out = [];
+
+    for (const tr of rows) {
+      const tds = Array.from(tr.querySelectorAll("td"));
+      if (tds.length < 3) continue;
+
+      // Asset
+      const assetRaw = norm(tds[0].innerText).toUpperCase();
+      const asset = (assetRaw.match(/^([A-Z0-9.\-:]{2,15})/) || [])[1];
+      if (!asset) continue;
+
+      // Type
+      const typeText = norm(tds[1].innerText).toUpperCase();
+      const side = /SHORT/.test(typeText) ? "SHORT" : /LONG/.test(typeText) ? "LONG" : null;
+      if (!side) continue;
+
+      // Position Value / Size -> "47,548.42 ETH"
+      const pv = norm(tds[2].innerText).toUpperCase();
+      const m = pv.match(new RegExp(`([0-9][0-9.,\\s]+)\\s+${asset}\\b`));
+      const sizeCoin = m ? Number(m[1].replace(/[ ,]/g, "")) : null;
+
+      out.push({ key: `${asset}:${side}`, symbol: asset, side, sizeCoin });
+    }
+    return out;
+  });
+
+  if (byTable && byTable.length) { await page.close(); return byTable; }
+
+  // 1) __NEXT_DATA__
   const nextTxt = await page.evaluate(() => {
     const el = document.querySelector("#__NEXT_DATA__");
     return el ? el.textContent : null;
   });
 
-  if (nextTxt){
-    try{
+  if (nextTxt) {
+    try {
       const json = JSON.parse(nextTxt);
       const pos = extractFromNextData(json);
       if (pos.length){ await page.close(); return pos; }
-    }catch{}
+    } catch {}
   }
 
+  // 2) Фолбэк по тексту
   const lines = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
     const roots = [];
@@ -186,7 +241,8 @@ async function getPositions(browser){
             .map((td) => norm(td.innerText))
             .filter(Boolean)
             .join(" | ")
-        ).filter(Boolean);
+        )
+        .filter(Boolean);
       const rows = Array.from(root.querySelectorAll("li,[role='row'],.row"))
         .map((n) => norm(n.innerText))
         .filter(Boolean);
@@ -219,7 +275,6 @@ async function getPositions(browser){
     const keys = uniq(curr.map(p => p.key)).sort();
     const { added, removed } = diffKeys(prev.keys, keys);
 
-    // изменения размера для общих ключей
     const resized = [];
     for (const p of curr) {
       if (prev.keys.includes(p.key)) {
@@ -233,12 +288,10 @@ async function getPositions(browser){
       }
     }
 
-    // ⏰ нужен ли плановый отчёт
     const now = Date.now();
     const heartbeatDue = !prev.lastHeartbeat ||
       (now - prev.lastHeartbeat) >= HEARTBEAT_HOURS * 3600 * 1000;
 
-    // собираем сообщение
     const parts = [`HyperDash монитор\n${TRADER_URL}`];
 
     if (heartbeatDue) {
@@ -293,7 +346,6 @@ async function getPositions(browser){
       console.log("No changes.");
     }
 
-    // обновляем state: ключи/размеры всегда; heartbeat — только если он был отправлен
     const sizes = { ...(prev.sizes || {}) };
     for (const p of curr) if (p.sizeCoin != null) sizes[p.key] = p.sizeCoin;
 
@@ -308,6 +360,4 @@ async function getPositions(browser){
     await browser.close();
   }
 })();
-
-
 
