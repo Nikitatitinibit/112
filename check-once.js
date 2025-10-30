@@ -1,5 +1,5 @@
 // HyperDash -> Telegram
-// Оповещения: открытие/закрытие, изменение размера (в монетах), плановый отчёт.
+// Алерты: открытие/закрытие, изменение размера (в монетах), плановый отчёт.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -81,26 +81,27 @@ async function getPositions(browser){
   await sleep(2500);
 
   const items = await page.evaluate(() => {
-    const NBSP = /\u00A0|\u202F/g;
-    const norm = (s) => (s || "").replace(NBSP, " ").replace(/\s+/g, " ").trim();
-    const normKeepNL = (s) => (s || "").replace(NBSP, " ");
+    // максимально терпим к любым "пробелам"
+    const NBSP_ALL = /[\u00A0\u202F\u2000-\u200B]/g;
+    const clean = (s) => (s || "").replace(NBSP_ALL, " ");
+    const trim = (s) => clean(s).replace(/\s+/g, " ").trim();
 
-    // ищем контейнер с заголовками "Asset Positions" и "Position Value / Size"
+    // ищем контейнер, в котором есть и "Asset Positions", и "Position Value / Size"
     function score(el) {
       const t = (el.innerText || "").toLowerCase();
       let sc = 0;
-      if (t.includes("asset positions")) sc += 2;
+      if (t.includes("asset positions")) sc += 3;
       if (t.includes("position value / size")) sc += 3;
       if (el.querySelector("table")) sc += 2;
       if (el.querySelector("[role='row']")) sc += 1;
       return sc;
     }
-    const cands = Array.from(document.querySelectorAll("section,div"))
+    const candidates = Array.from(document.querySelectorAll("section,div"))
       .map(el => [el, score(el)])
       .filter(([,s]) => s > 0)
       .sort((a,b) => b[1]-a[1]);
 
-    const root = cands.length ? cands[0][0] : document.body;
+    const root = candidates.length ? candidates[0][0] : document.body;
 
     const rows = Array.from(root.querySelectorAll("tr,[role='row']"))
       .filter(r => r.querySelectorAll("td,[role='cell']").length >= 3);
@@ -110,45 +111,40 @@ async function getPositions(browser){
       const cells = row.querySelectorAll("td,[role='cell']");
       if (cells.length < 3) continue;
 
-      const t0 = norm(cells[0].innerText).toUpperCase();
-      if (!t0) continue;
-
-      // символ — первое слово
+      // 1) символ из 1-й колонки
+      const t0 = trim(cells[0].innerText).toUpperCase();
       const symbol = (t0.split(/\s+/)[0] || "").replace(/[^A-Z0-9.\-:]/g,"");
       if (!symbol || symbol === "ASSET") continue;
 
-      // сторона из 2-й колонки
-      const t1 = norm(cells[1].innerText).toUpperCase();
+      // 2) сторона из 2-й колонки
+      const t1 = trim(cells[1].innerText).toUpperCase();
       const side = (t1.match(/\b(LONG|SHORT)\b/) || [,""])[1];
       if (!side) continue;
 
-      // размер монет из 3-й колонки (вторая строка, в конце — "N SYMBOL")
-      const t2 = normKeepNL(cells[2].innerText || "") + " " +
-                 Array.from(cells[2].querySelectorAll("[title]"))
-                   .map(n => n.getAttribute("title") || "").join(" ");
-      // берём самый «правый» шаблон "число + SYMBOL"
-      const rx = /([0-9][0-9.,\s]+)\s*([A-Z0-9.\-:]{2,15})\s*$/m;
-      let m = rx.exec(t2.toUpperCase());
-      if (!m) {
-        // резерв: искать число + конкретный symbol где-нибудь в тексте
-        const rxSym = new RegExp("([0-9][0-9.,\\s]+)\\s*" + symbol + "\\b","m");
-        m = rxSym.exec(t2.toUpperCase());
+      // 3) размер в монетах из 3-й колонки
+      //    там две строки: "$…" и "<число> SYMBOL". Берём строку с symbol и без '$'
+      const raw2 = clean(cells[2].innerText || "");
+      const lines = raw2.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      let sizeLine = lines.find(s => s.toUpperCase().includes(symbol) && !s.includes("$"));
+      if (!sizeLine) {
+        // иногда строку рендерят как один блок без \n — пробуем разбить по двойным пробелам
+        const parts = raw2.split(/ {2,}/).map(s => s.trim()).filter(Boolean);
+        sizeLine = parts.find(s => s.toUpperCase().includes(symbol) && !s.includes("$")) || "";
       }
-
       let sizeCoin = null;
+      const m = /([0-9][0-9.,\s\u00A0\u202F\u2000-\u200B]+)/.exec(sizeLine);
       if (m) {
-        const val = Number(String(m[1]).replace(/[ ,]/g,"").replace(/\u00A0|\u202F/g,""));
+        const val = Number(String(m[1]).replace(/[\s,\u00A0\u202F\u2000-\u200B]/g, ""));
         if (Number.isFinite(val)) sizeCoin = val;
       }
 
       out.push({ key: `${symbol}:${side}`, symbol, side, sizeCoin });
     }
+
     return out;
   });
 
   await page.close();
-
-  // если вдруг ничего не нашли (редкий случай), вернём как есть
   return items;
 }
 
@@ -258,4 +254,5 @@ async function getPositions(browser){
     await browser.close();
   }
 })();
+
 
