@@ -81,8 +81,8 @@ jobs:
           PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           SIZE_TOL: "0.0"        # абсолютный порог изменения размера (в монетах)
-          SIZE_TOL_REL: "0.005"  # относительный порог (0.5%)
-          HEARTBEAT_HOURS: "1"   # раз в N часов шлём плановый отчёт
+          SIZE_TOL_REL: "0.005"  # относительный (0.5%)
+          HEARTBEAT_HOURS: "4"   # раз в N часов шлём плановый отчёт
         run: node check-once.js
 
       - name: Commit state if changed (force add + rebase autostash)
@@ -93,7 +93,7 @@ jobs:
 
           CHANGED=0
           for f in state-keys.json state.json last_positions.json snapshot.json; do
-            if [ -f "$f" ]; then
+            if [ -f "$f" ] ; then
               git add -f "$f" || true
               CHANGED=1
             fi
