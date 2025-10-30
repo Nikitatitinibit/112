@@ -1,13 +1,9 @@
 {
-  "keys": [
-    "BTC:LONG",
-    "ETH:LONG",
-    "SOL:LONG"
-  ],
+  "keys": [],
   "sizes": {
     "BTC:LONG": 1030.03,
     "SOL:LONG": 560839.53,
     "ETH:LONG": 39000
   },
-  "lastHeartbeat": 1761857219204
+  "lastHeartbeat": 1761861275529
 }
