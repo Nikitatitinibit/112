@@ -1,6 +1,5 @@
-// check-once.js — HyperDash → Telegram
-// Алерты: открытие/закрытие позиции, изменение размера (в монетах),
-// и плановый отчёт раз в HEARTBEAT_HOURS часов.
+// HyperDash -> Telegram
+// Алерты: открытие/закрытие, изменение размера (в монетах), плановый отчёт.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -23,6 +22,12 @@ const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0");
 const HEARTBEAT_HOURS = parseFloat(process.env.HEARTBEAT_HOURS || "4");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmt = (n, p = 2) =>
+  n == null || !Number.isFinite(n)
+    ? "-"
+    : Math.abs(n) >= 1
+    ? n.toLocaleString("en-US", { maximumFractionDigits: p })
+    : n.toFixed(6);
 
 async function sendTelegram(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -49,11 +54,9 @@ function loadState() {
   catch { return { keys: [], sizes: {}, lastHeartbeat: 0 }; }
 }
 function saveState(s) { writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
-
 function uniq(a){ return [...new Set(a)]; }
 function num(x){
   if (x == null) return null;
-  // удаляем обычные пробелы, NBSP (U+00A0) и узкие NBSP (U+202F), а также запятые
   const n = Number(String(x).replace(/[ \u00A0\u202F,]/g, ""));
   return Number.isFinite(n) ? n : null;
 }
@@ -71,71 +74,8 @@ function changedEnough(oldV, newV){
   if (SIZE_TOL_REL > 0 && rel > SIZE_TOL_REL) return true;
   return (SIZE_TOL === 0 && SIZE_TOL_REL === 0) ? abs > 0 : false;
 }
-function fmt(n, p = 2){
-  if (n == null || !Number.isFinite(n)) return "-";
-  const a = Math.abs(n);
-  if (a >= 1) return n.toLocaleString("en-US", { maximumFractionDigits: p });
-  return n.toFixed(6);
-}
 
-// ── из __NEXT_DATA__
-function extractFromNextData(json){
-  const res = [];
-  function* walk(o){
-    if (Array.isArray(o)) for (const v of o) yield* walk(v);
-    else if (o && typeof o === "object") {
-      yield o;
-      for (const v of Object.values(o)) yield* walk(v);
-    }
-  }
-  for (const o of walk(json)){
-    const symbol = o.symbol || o.asset || o.coin || o.name;
-    let side = null;
-    if (typeof o.isLong === "boolean") side = o.isLong ? "LONG" : "SHORT";
-    else if (o.side) side = String(o.side).toUpperCase();
-
-    const sizeCandidates = [
-      o.baseSize, o.qty, o.contracts, o.szi, o.sz, o.positionSize, o.coinSize,
-    ].map(num).filter(x=>x!=null);
-
-    if (symbol && (side==="LONG"||side==="SHORT") &&
-        /^[A-Z0-9.\-:]{2,15}$/.test(String(symbol).toUpperCase())){
-      const key = `${String(symbol).toUpperCase()}:${side}`;
-      const sizeCoin = sizeCandidates.length ? Math.abs(sizeCandidates[0]) : null;
-      res.push({ key, symbol: String(symbol).toUpperCase(), side, sizeCoin });
-    }
-  }
-  const map = new Map();
-  for (const p of res) map.set(p.key, p);
-  return [...map.values()];
-}
-
-// ── фолбэк по тексту
-function extractFromText(lines){
-  const items = [];
-  for (const raw of lines){
-    const s = (raw || "").toUpperCase();
-    let mKey =
-      s.match(/^\s*([A-Z0-9.\-:]{2,15})\s+\d+x.*\b(LONG|SHORT)\b/) ||
-      s.match(/^\s*([A-Z0-9.\-:]{2,15})\s*[| ].*?\b(LONG|SHORT)\b/);
-    if (!mKey) continue;
-    const symbol = mKey[1].toUpperCase();
-    const side = mKey[2].toUpperCase();
-    if (symbol==="ASSET" || symbol==="TYPE") continue;
-    const key = `${symbol}:${side}`;
-
-    const rx = new RegExp(`([0-9][0-9.,\\s\\u00A0\\u202F]+)\\s+${symbol}\\b`);
-    const mSize = s.match(rx);
-    const sizeCoin = mSize ? num(mSize[1]) : null;
-
-    items.push({ key, symbol, side, sizeCoin });
-  }
-  const map = new Map();
-  for (const p of items) map.set(p.key, p);
-  return [...map.values()];
-}
-
-// ── основной парсер позиций
+// ── парсер позиций (робастный, двухпроходный по тексту раздела)
 async function getPositions(browser){
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -145,185 +85,95 @@ async function getPositions(browser){
   await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
   await sleep(2500);
 
-  // 0) Парсим позиционную таблицу (ищем индексы колонок по заголовкам)
-  const byTable = await page.evaluate(() => {
-    const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  const items = await page.evaluate(() => {
+    const NBSP_RX = /\u00A0|\u202F/g;
+    const norm = (s) => (s || "").replace(NBSP_RX, " ").replace(/\s+/g, " ").trim();
 
-    const getAllTexts = (el) => {
-      if (!el) return "";
-      const arr = [el.innerText || "", el.textContent || ""];
-      el.querySelectorAll("[title]").forEach(n => {
-        const t = n.getAttribute("title");
-        if (t) arr.push(t);
-      });
-      return arr.map(norm).filter(Boolean).join(" | ");
-    };
+    const roots = new Set();
 
-    function findTableAndCols(){
-      const candidates = [
-        ...Array.from(document.querySelectorAll("table")),
-        ...Array.from(document.querySelectorAll('[role="table"]')),
-      ];
-
-      for (const t of candidates){
-        const heads = [
-          ...Array.from(t.querySelectorAll("thead th, thead [role='columnheader']")),
-          ...Array.from(t.querySelectorAll('[role="rowgroup"] [role="columnheader"]')),
-        ].map(el => norm(el.innerText || el.textContent || ""));
-
-        if (!heads.length) continue;
-
-        let idxAsset = -1, idxType = -1, idxPos = -1;
-        heads.forEach((h,i)=>{
-          const hh = h.toLowerCase();
-          if (idxAsset < 0 && /asset/.test(hh)) idxAsset = i;
-          if (idxType  < 0 && /type/.test(hh))  idxType  = i;
-          if (idxPos   < 0 && /(position\s*value|size)/.test(hh)) idxPos = i;
-        });
-        if (idxAsset < 0 || idxType < 0 || idxPos < 0) continue;
-
-        const bodyRows = [
-          ...Array.from(t.querySelectorAll("tbody tr")),
-          ...Array.from(t.querySelectorAll('[role="rowgroup"] [role="row"]')),
-        ];
-        if (!bodyRows.length) continue;
-
-        const rows = [];
-        for (const tr of bodyRows){
-          const cells = [
-            ...Array.from(tr.querySelectorAll("td")),
-            ...Array.from(tr.querySelectorAll('[role="cell"]')),
-          ];
-          if (!cells.length) continue;
-
-          const cellText = (i) => cells[i] ? norm(cells[i].innerText || cells[i].textContent || "") : "";
-          const rowText  = norm(tr.textContent || "");
-
-          // 1) Asset
-          const assetRaw = cellText(idxAsset).toUpperCase();
-          const mA = assetRaw.match(/^([A-Z0-9.\-:]{2,15})/);
-          const asset = mA ? mA[1] : null;
-          if (!asset) continue;
-
-          // 2) Type
-          const sideTxt = cellText(idxType).toUpperCase();
-          const side = /SHORT/.test(sideTxt) ? "SHORT" : (/LONG/.test(sideTxt) ? "LONG" : null);
-          if (!side) continue;
-
-          // 3) Size — по всей строке и в самой ячейке (включая title)
-          const rx = new RegExp(`([0-9][0-9.,\\s\\u00A0\\u202F]+)\\s*${asset}\\b`);
-          let sizeCoin = null;
-
-          let m = rowText.toUpperCase().match(rx);
-          if (!m) {
-            const posCellText = (cells[idxPos] ? getAllTexts(cells[idxPos]) : "").toUpperCase();
-            m = posCellText.match(rx);
-          }
-          if (!m) {
-            const posCellText = (cells[idxPos] ? getAllTexts(cells[idxPos]) : "").toUpperCase();
-            m = posCellText.match(/([0-9][0-9.,\s\u00A0\u202F]+)/);
-          }
-          if (m) {
-            sizeCoin = Number(String(m[1]).replace(/[ \u00A0\u202F,]/g, ""));
-            if (!Number.isFinite(sizeCoin)) sizeCoin = null;
-          }
-
-          rows.push({ key: `${asset}:${side}`, symbol: asset, side, sizeCoin });
-        }
-
-        if (rows.length) return rows;
-      }
-      return null;
-    }
-
-    return findTableAndCols();
-  });
-
-  if (byTable && byTable.length) {
-    await page.close();
-    return byTable;
-  }
-
-  // 1) __NEXT_DATA__
-  const nextTxt = await page.evaluate(() => {
-    const el = document.querySelector("#__NEXT_DATA__");
-    return el ? el.textContent : null;
-  });
-  if (nextTxt) {
-    try {
-      const json = JSON.parse(nextTxt);
-      const pos = (function extract(json){
-        const res = [];
-        function* walk(o){
-          if (Array.isArray(o)) for (const v of o) yield* walk(v);
-          else if (o && typeof o === "object") {
-            yield o;
-            for (const v of Object.values(o)) yield* walk(v);
-          }
-        }
-        for (const o of walk(json)){
-          const symbol = o.symbol || o.asset || o.coin || o.name;
-          let side = null;
-          if (typeof o.isLong === "boolean") side = o.isLong ? "LONG" : "SHORT";
-          else if (o.side) side = String(o.side).toUpperCase();
-
-          const tryNum = (v)=> {
-            if (v==null) return null;
-            const n = Number(String(v).replace(/[ \u00A0\u202F,]/g,""));
-            return Number.isFinite(n) ? n : null;
-          };
-          const sizeCandidates = [o.baseSize, o.qty, o.contracts, o.szi, o.sz, o.positionSize, o.coinSize]
-            .map(tryNum).filter(x=>x!=null);
-
-          if (symbol && (side==="LONG"||side==="SHORT") &&
-              /^[A-Z0-9.\-:]{2,15}$/.test(String(symbol).toUpperCase())){
-            const key = `${String(symbol).toUpperCase()}:${side}`;
-            const sizeCoin = sizeCandidates.length ? Math.abs(sizeCandidates[0]) : null;
-            res.push({ key, symbol: String(symbol).toUpperCase(), side, sizeCoin });
-          }
-        }
-        const map = new Map();
-        for (const p of res) map.set(p.key, p);
-        return [...map.values()];
-      })(json);
-
-      if (pos.length){ await page.close(); return pos; }
-    } catch {}
-  }
-
-  // 2) текстовый фолбэк
-  const lines = await page.evaluate(() => {
-    const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-    const roots = [];
+    // пытаемся найти секцию с позициями
     document.querySelectorAll("*").forEach((el) => {
       const t = (el.textContent || "").toLowerCase();
       if (t.includes("asset positions") || t === "positions") {
         const r = el.closest("section") || el.parentElement || el;
-        if (r) roots.push(r);
+        if (r) roots.add(r);
       }
     });
-    roots.push(
-      document.querySelector("[data-testid*='positions']"),
-      document.querySelector(".open-positions"),
-      document.querySelector("#positions")
-    );
+    roots.add(document.querySelector("[data-testid*='positions']"));
+    roots.add(document.querySelector(".open-positions"));
+    roots.add(document.querySelector("#positions"));
+
+    // собираем «строки» из таблиц/рядов/листов, + все title
     const harvest = (root) => {
       if (!root) return [];
+      const take = (el) => {
+        const bucket = [];
+        const push = (txt) => {
+          const v = norm(txt);
+          if (v) bucket.push(v);
+        };
+        push(el.innerText || "");
+        el.querySelectorAll("[title]").forEach(n => push(n.getAttribute("title") || ""));
+        return bucket.join(" | ");
+      };
+
       const tbl = Array.from(root.querySelectorAll("tr"))
         .map(r => Array.from(r.querySelectorAll("th,td"))
-          .map(td => norm(td.innerText)).filter(Boolean).join(" | "))
+          .map(take).filter(Boolean).join(" | "))
         .filter(Boolean);
-      const rows = Array.from(root.querySelectorAll("li,[role='row'],.row"))
-        .map(n => norm(n.innerText)).filter(Boolean);
-      return [...new Set([...tbl, ...rows])];
+
+      const grid = Array.from(root.querySelectorAll("[role='row']"))
+        .map(take).filter(Boolean);
+
+      const list = Array.from(root.querySelectorAll("li,.row"))
+        .map(take).filter(Boolean);
+
+      return [...new Set([...tbl, ...grid, ...list])];
     };
-    return [...new Set(roots.filter(Boolean).flatMap(harvest))];
+
+    const lines = [...new Set([...roots].filter(Boolean).flatMap(harvest))];
+
+    // 1) sideMap: SYMBOL -> LONG/SHORT
+    const sideMap = {};
+    for (const raw of lines) {
+      const s = raw.toUpperCase();
+      const m = s.match(/\b([A-Z0-9.\-:]{2,15})\b.*\b(LONG|SHORT)\b/);
+      if (m) {
+        const sym = m[1];
+        if (sym !== "ASSET" && sym !== "TYPE") sideMap[sym] = m[2];
+      }
+    }
+
+    // 2) sizeMap: SYMBOL -> <число монет>, ищем по ЛЮБЫМ строкам (даже с $)
+    const sizeMap = {};
+    const RX = /([0-9][0-9.,\s\u00A0\u202F]+)\s*([A-Z0-9.\-:]{2,15})\b/g;
+
+    for (const raw of lines) {
+      const s = raw.toUpperCase();
+      let m;
+      while ((m = RX.exec(s))) {
+        const val = Number(String(m[1]).replace(/[ \u00A0\u202F,]/g, ""));
+        const sym = m[2];
+        if (!Number.isFinite(val)) continue;
+        if (sym === "ASSET" || sym === "TYPE" || sym === "PNL" || sym === "UPNL") continue;
+        sizeMap[sym] = val; // последнее по документу значение — актуальный размер
+      }
+    }
+
+    // 3) склейка
+    const out = [];
+    Object.entries(sideMap).forEach(([sym, side]) => {
+      out.push({ key: `${sym}:${side}`, symbol: sym, side, sizeCoin: sizeMap[sym] ?? null });
+    });
+
+    return out;
   });
 
   await page.close();
-  return extractFromText(lines);
+  return items;
 }
 
+// ── основной запуск
 (async () => {
   const browser = await puppeteer.launch({
     headless: true,
