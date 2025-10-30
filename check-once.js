@@ -1,5 +1,5 @@
 // HyperDash -> Telegram
-// Алерты: открытие/закрытие, изменение размера (в монетах), плановый отчёт.
+// Оповещения: открытие/закрытие, изменение размера (в монетах), плановый отчёт.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -55,11 +55,6 @@ function loadState() {
 }
 function saveState(s) { writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
 function uniq(a){ return [...new Set(a)]; }
-function num(x){
-  if (x == null) return null;
-  const n = Number(String(x).replace(/[ \u00A0\u202F,]/g, ""));
-  return Number.isFinite(n) ? n : null;
-}
 function diffKeys(prevArr, curArr){
   const prev = new Set(prevArr || []);
   const cur = new Set(curArr || []);
@@ -75,7 +70,7 @@ function changedEnough(oldV, newV){
   return (SIZE_TOL === 0 && SIZE_TOL_REL === 0) ? abs > 0 : false;
 }
 
-// ── парсер позиций (робастный, двухпроходный по тексту раздела)
+// ── точечный парсер таблицы "Asset Positions"
 async function getPositions(browser){
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -86,90 +81,74 @@ async function getPositions(browser){
   await sleep(2500);
 
   const items = await page.evaluate(() => {
-    const NBSP_RX = /\u00A0|\u202F/g;
-    const norm = (s) => (s || "").replace(NBSP_RX, " ").replace(/\s+/g, " ").trim();
+    const NBSP = /\u00A0|\u202F/g;
+    const norm = (s) => (s || "").replace(NBSP, " ").replace(/\s+/g, " ").trim();
+    const normKeepNL = (s) => (s || "").replace(NBSP, " ");
 
-    const roots = new Set();
-
-    // пытаемся найти секцию с позициями
-    document.querySelectorAll("*").forEach((el) => {
-      const t = (el.textContent || "").toLowerCase();
-      if (t.includes("asset positions") || t === "positions") {
-        const r = el.closest("section") || el.parentElement || el;
-        if (r) roots.add(r);
-      }
-    });
-    roots.add(document.querySelector("[data-testid*='positions']"));
-    roots.add(document.querySelector(".open-positions"));
-    roots.add(document.querySelector("#positions"));
-
-    // собираем «строки» из таблиц/рядов/листов, + все title
-    const harvest = (root) => {
-      if (!root) return [];
-      const take = (el) => {
-        const bucket = [];
-        const push = (txt) => {
-          const v = norm(txt);
-          if (v) bucket.push(v);
-        };
-        push(el.innerText || "");
-        el.querySelectorAll("[title]").forEach(n => push(n.getAttribute("title") || ""));
-        return bucket.join(" | ");
-      };
-
-      const tbl = Array.from(root.querySelectorAll("tr"))
-        .map(r => Array.from(r.querySelectorAll("th,td"))
-          .map(take).filter(Boolean).join(" | "))
-        .filter(Boolean);
-
-      const grid = Array.from(root.querySelectorAll("[role='row']"))
-        .map(take).filter(Boolean);
-
-      const list = Array.from(root.querySelectorAll("li,.row"))
-        .map(take).filter(Boolean);
-
-      return [...new Set([...tbl, ...grid, ...list])];
-    };
-
-    const lines = [...new Set([...roots].filter(Boolean).flatMap(harvest))];
-
-    // 1) sideMap: SYMBOL -> LONG/SHORT
-    const sideMap = {};
-    for (const raw of lines) {
-      const s = raw.toUpperCase();
-      const m = s.match(/\b([A-Z0-9.\-:]{2,15})\b.*\b(LONG|SHORT)\b/);
-      if (m) {
-        const sym = m[1];
-        if (sym !== "ASSET" && sym !== "TYPE") sideMap[sym] = m[2];
-      }
+    // ищем контейнер с заголовками "Asset Positions" и "Position Value / Size"
+    function score(el) {
+      const t = (el.innerText || "").toLowerCase();
+      let sc = 0;
+      if (t.includes("asset positions")) sc += 2;
+      if (t.includes("position value / size")) sc += 3;
+      if (el.querySelector("table")) sc += 2;
+      if (el.querySelector("[role='row']")) sc += 1;
+      return sc;
     }
+    const cands = Array.from(document.querySelectorAll("section,div"))
+      .map(el => [el, score(el)])
+      .filter(([,s]) => s > 0)
+      .sort((a,b) => b[1]-a[1]);
 
-    // 2) sizeMap: SYMBOL -> <число монет>, ищем по ЛЮБЫМ строкам (даже с $)
-    const sizeMap = {};
-    const RX = /([0-9][0-9.,\s\u00A0\u202F]+)\s*([A-Z0-9.\-:]{2,15})\b/g;
+    const root = cands.length ? cands[0][0] : document.body;
 
-    for (const raw of lines) {
-      const s = raw.toUpperCase();
-      let m;
-      while ((m = RX.exec(s))) {
-        const val = Number(String(m[1]).replace(/[ \u00A0\u202F,]/g, ""));
-        const sym = m[2];
-        if (!Number.isFinite(val)) continue;
-        if (sym === "ASSET" || sym === "TYPE" || sym === "PNL" || sym === "UPNL") continue;
-        sizeMap[sym] = val; // последнее по документу значение — актуальный размер
-      }
-    }
+    const rows = Array.from(root.querySelectorAll("tr,[role='row']"))
+      .filter(r => r.querySelectorAll("td,[role='cell']").length >= 3);
 
-    // 3) склейка
     const out = [];
-    Object.entries(sideMap).forEach(([sym, side]) => {
-      out.push({ key: `${sym}:${side}`, symbol: sym, side, sizeCoin: sizeMap[sym] ?? null });
-    });
+    for (const row of rows) {
+      const cells = row.querySelectorAll("td,[role='cell']");
+      if (cells.length < 3) continue;
 
+      const t0 = norm(cells[0].innerText).toUpperCase();
+      if (!t0) continue;
+
+      // символ — первое слово
+      const symbol = (t0.split(/\s+/)[0] || "").replace(/[^A-Z0-9.\-:]/g,"");
+      if (!symbol || symbol === "ASSET") continue;
+
+      // сторона из 2-й колонки
+      const t1 = norm(cells[1].innerText).toUpperCase();
+      const side = (t1.match(/\b(LONG|SHORT)\b/) || [,""])[1];
+      if (!side) continue;
+
+      // размер монет из 3-й колонки (вторая строка, в конце — "N SYMBOL")
+      const t2 = normKeepNL(cells[2].innerText || "") + " " +
+                 Array.from(cells[2].querySelectorAll("[title]"))
+                   .map(n => n.getAttribute("title") || "").join(" ");
+      // берём самый «правый» шаблон "число + SYMBOL"
+      const rx = /([0-9][0-9.,\s]+)\s*([A-Z0-9.\-:]{2,15})\s*$/m;
+      let m = rx.exec(t2.toUpperCase());
+      if (!m) {
+        // резерв: искать число + конкретный symbol где-нибудь в тексте
+        const rxSym = new RegExp("([0-9][0-9.,\\s]+)\\s*" + symbol + "\\b","m");
+        m = rxSym.exec(t2.toUpperCase());
+      }
+
+      let sizeCoin = null;
+      if (m) {
+        const val = Number(String(m[1]).replace(/[ ,]/g,"").replace(/\u00A0|\u202F/g,""));
+        if (Number.isFinite(val)) sizeCoin = val;
+      }
+
+      out.push({ key: `${symbol}:${side}`, symbol, side, sizeCoin });
+    }
     return out;
   });
 
   await page.close();
+
+  // если вдруг ничего не нашли (редкий случай), вернём как есть
   return items;
 }
 
