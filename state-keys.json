@@ -1,5 +1,9 @@
 {
-  "keys": [],
+  "keys": [
+    "BTC:LONG",
+    "ETH:LONG",
+    "SOL:LONG"
+  ],
   "sizes": {
     "BTC:LONG": 1030.03,
     "SOL:LONG": 560839.53,
