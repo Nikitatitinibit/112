@@ -5,9 +5,9 @@
     "SOL:LONG"
   ],
   "sizes": {
-    "BTC:LONG": 1030.03,
-    "SOL:LONG": 560839.53,
+    "BTC:LONG": 1070.03,
+    "SOL:LONG": 569050.58,
     "ETH:LONG": 39000
   },
-  "lastHeartbeat": 1762003945938
+  "lastHeartbeat": 1762007889107
 }
