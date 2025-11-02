@@ -1,0 +1,14 @@
+{
+  "keys": [
+    "BTC:LONG",
+    "ETH:LONG",
+    "SOL:LONG"
+  ],
+  "sizes": {
+    "ETH:LONG": 39000,
+    "BTC:LONG": 1070.03,
+    "SOL:LONG": 569050.58
+  },
+  "ordersKeys": [],
+  "lastHeartbeat": 1762076162472
+}
