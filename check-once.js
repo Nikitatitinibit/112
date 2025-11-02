@@ -1,5 +1,5 @@
 // HyperDash -> Telegram
-// Алерты: позиции (монеты), Open Orders, плановый отчёт.
+// Алерты: позиции (в монетах), Open Orders, плановый отчёт.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -29,7 +29,6 @@ const fmt = (n, p = 2) =>
     ? n.toLocaleString("en-US", { maximumFractionDigits: p })
     : n.toFixed(6);
 
-// ——— Telegram
 async function sendTelegram(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -47,7 +46,6 @@ async function sendTelegram(text) {
   }
 }
 
-// ——— State
 function loadState() {
   try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); }
   catch { return { keys: [], sizes: {}, ordersKeys: [], lastHeartbeat: 0 }; }
@@ -69,7 +67,7 @@ function changedEnough(oldV, newV){
   return (SIZE_TOL === 0 && SIZE_TOL_REL === 0) ? abs > 0 : false;
 }
 
-// ——— Парсеры внутри страницы
+// ── Снятие данных со страницы
 async function getData(browser){
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -79,38 +77,29 @@ async function getData(browser){
   await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
   await sleep(2500);
 
-  const result = await page.evaluate(() => {
+  // --- Positions (вкладка по умолчанию видна)
+  const positions = await page.evaluate(() => {
     const NBSP_ALL = /[\u00A0\u202F\u2000-\u200B]/g;
     const clean = (s) => (s || "").replace(NBSP_ALL, " ");
     const trim = (s) => clean(s).replace(/\s+/g, " ").trim();
+    const isVisible = (el) =>
+      !!(el &&
+         el.offsetParent !== null &&
+         getComputedStyle(el).visibility !== "hidden" &&
+         getComputedStyle(el).display !== "none");
 
-    const allBlocks = Array.from(document.querySelectorAll("section,div"));
+    // контейнер таблицы позиций (работаем даже если текста нет)
+    const containers = Array.from(document.querySelectorAll("section,div"));
+    const posRoot =
+      containers.find(el => /asset positions/i.test(el.innerText || "")) ||
+      document.body;
 
-    function findRoot(words){
-      function score(el){
-        const t = (el.innerText || "").toLowerCase();
-        let s = 0;
-        for (const w of words) if (t.includes(w)) s += 2;
-        if (el.querySelector("table")) s += 2;
-        if (el.querySelector("[role='row']")) s += 1;
-        return s;
-      }
-      const ranked = allBlocks.map(el => [el, score(el)])
-        .filter(([,s]) => s > 0)
-        .sort((a,b) => b[1]-a[1]);
-      return ranked.length ? ranked[0][0] : document.body;
-    }
+    const rows = Array.from(posRoot.querySelectorAll("tr,[role='row']"))
+      .filter(r => isVisible(r) && r.querySelectorAll("td,[role='cell']").length >= 3);
 
-    // — Positions
-    const posRoot = findRoot(["asset positions","position value / size"]);
-    const posRows = Array.from(posRoot.querySelectorAll("tr,[role='row']"))
-      .filter(r => r.querySelectorAll("td,[role='cell']").length >= 3);
-
-    const positions = [];
-    for (const row of posRows) {
+    const out = [];
+    for (const row of rows) {
       const cells = row.querySelectorAll("td,[role='cell']");
-      if (cells.length < 3) continue;
-
       const t0 = trim(cells[0].innerText).toUpperCase();
       const symbol = (t0.split(/\s+/)[0] || "").replace(/[^A-Z0-9.\-:]/g,"");
       if (!symbol || symbol === "ASSET") continue;
@@ -132,22 +121,40 @@ async function getData(browser){
         const val = Number(String(m[1]).replace(/[\s,\u00A0\u202F\u2000-\u200B]/g, ""));
         if (Number.isFinite(val)) sizeCoin = val;
       }
-      positions.push({ key: `${symbol}:${side}`, symbol, side, sizeCoin });
+      out.push({ key: `${symbol}:${side}`, symbol, side, sizeCoin });
     }
+    return out;
+  });
 
-    // — Open Orders
-    const ordRoot = findRoot(["open orders","orders"]);
-    const ordRows = Array.from(ordRoot.querySelectorAll("tr,[role='row']"))
-      .filter(r => r.querySelectorAll("td,[role='cell']").length >= 3);
+  // --- Кликаем вкладку "Open Orders"
+  await page.evaluate(() => {
+    const all = Array.from(document.querySelectorAll("a,button,div,span"));
+    const btn = all.find(el => /open\s*orders/i.test((el.textContent || "").replace(/\s+/g," ").trim()));
+    if (btn) btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await sleep(700); // даём дорисоваться
 
-    const orders = [];
-    for (const row of ordRows) {
+  // --- Orders (парсим только видимые строки)
+  const orders = await page.evaluate(() => {
+    const NBSP_ALL = /[\u00A0\u202F\u2000-\u200B]/g;
+    const clean = (s) => (s || "").replace(NBSP_ALL, " ");
+    const trim = (s) => clean(s).replace(/\s+/g, " ").trim();
+    const isVisible = (el) =>
+      !!(el &&
+         el.offsetParent !== null &&
+         getComputedStyle(el).visibility !== "hidden" &&
+         getComputedStyle(el).display !== "none");
+
+    const rows = Array.from(document.querySelectorAll("tr,[role='row']"))
+      .filter(r => isVisible(r) && r.querySelectorAll("td,[role='cell']").length >= 3);
+
+    const out = [];
+    for (const row of rows) {
       const cells = row.querySelectorAll("td,[role='cell']");
       if (cells.length < 3) continue;
 
       // символ из 1-й ячейки
-      const t0 = trim(cells[0].innerText).toUpperCase();
-      const symbol = (t0.split(/\s+/)[0] || "").replace(/[^A-Z0-9.\-:]/g,"");
+      let symbol = trim(cells[0].innerText).toUpperCase().split(/\s+/)[0].replace(/[^A-Z0-9.\-:]/g,"");
       if (!symbol || symbol === "ASSET") continue;
 
       // сторона из текста строки
@@ -155,46 +162,43 @@ async function getData(browser){
       const side = (rowText.match(/\b(BUY|SELL|LONG|SHORT)\b/) || [,""])[1];
       if (!side) continue;
 
-      // размер — число + SYMBOL
+      // размер "<число> SYMBOL"
       let sizeCoin = null;
       for (const c of cells) {
-        const txt = clean(c.innerText || "").toUpperCase();
-        const mm = new RegExp("([0-9][0-9.,\\s\\u00A0\\u202F\\u2000-\\u200B]+)\\s*" + symbol + "\\b").exec(txt);
+        const tx = clean(c.innerText || "").toUpperCase();
+        const mm = new RegExp("([0-9][0-9.,\\s\\u00A0\\u202F\\u2000-\\u200B]+)\\s*" + symbol + "\\b").exec(tx);
         if (mm) {
           const v = Number(String(mm[1]).replace(/[\s,\u00A0\u202F\u2000-\u200B]/g,""));
           if (Number.isFinite(v)) { sizeCoin = v; break; }
         }
       }
 
-      // цена — первое «долларовое» число
+      // цена — сначала ищем с "$", иначе просто число с точкой/дефолтной точностью
       let price = null;
       for (const c of cells) {
-        const txt = clean(c.innerText || "");
-        if (!/[0-9]/.test(txt)) continue;
-        const mm = /(?:^|\s)\$?\s*([0-9][0-9,]*\.?[0-9]+)/.exec(txt);
+        const tx = clean(c.innerText || "");
+        let mm = /\$\s*([0-9][0-9,]*\.?[0-9]+)/.exec(tx);
+        if (!mm) mm = /(^|\s)([0-9][0-9,]*\.[0-9]{2,})($|\s)/.exec(tx);
         if (mm) {
-          const v = Number(mm[1].replace(/[, ]/g,""));
+          const raw = (mm[1] || mm[2]).replace(/,/g,"");
+          const v = Number(raw);
           if (Number.isFinite(v)) { price = v; break; }
         }
       }
 
       if (sizeCoin == null || price == null) continue;
-
-      // нормализованный ключ
       const szN = Math.round(sizeCoin * 1e8) / 1e8;
       const prN = Math.round(price * 100) / 100;
-      const key = `${symbol}:${side}:${szN}@${prN}`;
-      orders.push({ key, symbol, side, size: szN, price: prN });
+      out.push({ key: `${symbol}:${side}:${szN}@${prN}`, symbol, side, size: szN, price: prN });
     }
-
-    return { positions, orders };
+    return out;
   });
 
   await page.close();
-  return result;
+  return { positions, orders };
 }
 
-// ——— Основной запуск
+// ── Основной цикл
 (async () => {
   const browser = await puppeteer.launch({
     headless: true,
@@ -209,10 +213,10 @@ async function getData(browser){
   });
 
   try {
-    const prev = loadState(); // { keys, sizes, ordersKeys, lastHeartbeat }
+    const prev = loadState();
     const { positions: currPos, orders: currOrd } = await getData(browser);
 
-    // --- позиции
+    // позиции
     const posKeys = uniq(currPos.map(p => p.key)).sort();
     const { added: posAdded, removed: posRemoved } = diffSets(prev.keys, posKeys);
 
@@ -229,7 +233,7 @@ async function getData(browser){
       }
     }
 
-    // --- ордера
+    // ордера
     const ordKeys = uniq(currOrd.map(o => o.key)).sort();
     const { added: ordAdded, removed: ordRemoved } = diffSets(prev.ordersKeys || [], ordKeys);
 
@@ -237,20 +241,16 @@ async function getData(browser){
     const heartbeatDue = !prev.lastHeartbeat ||
       (now - prev.lastHeartbeat) >= HEARTBEAT_HOURS * 3600 * 1000;
 
-    // --- Сообщение
-    const chunks = [`HyperDash монитор\n${TRADER_URL}`];
+    const parts = [`HyperDash монитор\n${TRADER_URL}`];
 
     if (heartbeatDue) {
-      // Позиции
       const posLines = currPos
         .map(p => `• ${p.symbol} ${p.side} — ${fmt(p.sizeCoin)} ${p.symbol}`)
         .join("\n");
-      // Ордера
       const ordLines = currOrd
         .map(o => `• ${o.symbol} ${o.side} — ${fmt(o.size,8)} ${o.symbol} @ $${fmt(o.price,2)}`)
         .join("\n");
-
-      chunks.push(
+      parts.push(
         `⏰ Плановый отчёт (каждые ${HEARTBEAT_HOURS}ч)\n` +
         `Текущие позиции (${currPos.length}):\n${posLines || "—"}\n\n` +
         `Открытые ордера (${currOrd.length}):\n${ordLines || "—"}`
@@ -259,7 +259,7 @@ async function getData(browser){
 
     if (posAdded.length) {
       const byKey = Object.fromEntries(currPos.map(p => [p.key, p]));
-      chunks.push(
+      parts.push(
         "Открыты позиции:\n" +
         posAdded.map(k => {
           const p = byKey[k];
@@ -271,7 +271,7 @@ async function getData(browser){
     }
 
     if (posRemoved.length) {
-      chunks.push(
+      parts.push(
         "Закрыты позиции:\n" +
         posRemoved.map(k => {
           const lastSz = prev.sizes?.[k];
@@ -284,7 +284,7 @@ async function getData(browser){
     }
 
     if (resized.length) {
-      chunks.push(
+      parts.push(
         "Изменение размера позиции (в монетах):\n" +
         resized.map(r =>
           `• ${r.symbol} ${r.side}: ${fmt(r.oldV)} → ${fmt(r.newV)} ${r.symbol} ` +
@@ -295,7 +295,7 @@ async function getData(browser){
 
     if (ordAdded.length) {
       const byKey = Object.fromEntries(currOrd.map(o => [o.key, o]));
-      chunks.push(
+      parts.push(
         "🟢 Новые ордера:\n" +
         ordAdded.map(k => {
           const o = byKey[k];
@@ -307,10 +307,9 @@ async function getData(browser){
     }
 
     if (ordRemoved.length) {
-      chunks.push(
+      parts.push(
         "⚪️ Ордер исполнен/снят:\n" +
         ordRemoved.map(k => {
-          // красивый вид из ключа
           const m = /^([A-Z0-9.\-:]+):([A-Z]+):([0-9.]+)@([0-9.]+)$/.exec(k);
           if (m) {
             const [, sym, side, sz, pr] = m;
@@ -327,12 +326,11 @@ async function getData(browser){
       ordAdded.length || ordRemoved.length;
 
     if (shouldSend) {
-      await sendTelegram(chunks.join("\n\n"));
+      await sendTelegram(parts.join("\n\n"));
     } else {
       console.log("No changes.");
     }
 
-    // — сохранить новое состояние
     const sizes = { ...(prev.sizes || {}) };
     for (const p of currPos) if (p.sizeCoin != null) sizes[p.key] = p.sizeCoin;
 
