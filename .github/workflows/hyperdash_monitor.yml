@@ -74,7 +74,7 @@ jobs:
 
       - name: Run monitor script
         env:
-          TRADER_URL: "https://hyperdash.info/trader/0xc2a30212a8ddac9e123944d6e29faddce994e5f2"
+          TRADER_URL: "https://hyperdash.info/trader/0x9eec98d048d06d9cd75318fffa3f3960e081daab"
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
