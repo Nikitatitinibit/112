@@ -1,0 +1,17 @@
+{
+  "keys": [
+    "ASTER:SHORT",
+    "DOGE:SHORT",
+    "ETH:SHORT",
+    "KPEPE:SHORT",
+    "XRP:SHORT"
+  ],
+  "sizes": {
+    "ASTER:SHORT": 42966288,
+    "DOGE:SHORT": 155723151,
+    "ETH:SHORT": 6000,
+    "XRP:SHORT": 6610009,
+    "KPEPE:SHORT": 2141656593
+  },
+  "lastHeartbeat": 1762188419733
+}
