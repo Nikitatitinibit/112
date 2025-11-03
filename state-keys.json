@@ -1,16 +1,15 @@
 {
   "keys": [
-    "BTC:LONG",
     "ETH:LONG",
     "HYPE:LONG",
     "SOL:LONG"
   ],
   "sizes": {
-    "ETH:LONG": 39000,
+    "ETH:LONG": 21500,
     "BTC:LONG": 1210.03,
-    "SOL:LONG": 600839.53,
+    "SOL:LONG": 497501.66,
     "HYPE:LONG": 161961.04
   },
   "ordersKeys": [],
-  "lastHeartbeat": 1762169541023
+  "lastHeartbeat": 1762184751650
 }
