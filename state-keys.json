@@ -2,6 +2,7 @@
   "keys": [
     "ASTER:SHORT",
     "DOGE:SHORT",
+    "ETH:LONG",
     "KPEPE:SHORT",
     "XRP:SHORT"
   ],
@@ -10,7 +11,8 @@
     "DOGE:SHORT": 155723151,
     "ETH:SHORT": 6000,
     "XRP:SHORT": 6610009,
-    "KPEPE:SHORT": 2141656593
+    "KPEPE:SHORT": 2141656593,
+    "ETH:LONG": 524.0844
   },
   "lastHeartbeat": 1762278830021
 }
