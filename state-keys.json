@@ -1,5 +1,10 @@
 {
-  "keys": [],
+  "keys": [
+    "ASTER:SHORT",
+    "DOGE:LONG",
+    "ETH:LONG",
+    "KPEPE:SHORT"
+  ],
   "sizes": {
     "ASTER:SHORT": 42966288,
     "DOGE:SHORT": 35602838,
