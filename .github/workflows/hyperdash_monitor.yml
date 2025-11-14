@@ -82,7 +82,7 @@ jobs:
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
           SIZE_TOL: "0.0"
           SIZE_TOL_REL: "0.005"
-          HEARTBEAT_HOURS: "4"
+          HEARTBEAT_HOURS: "24"
         run: node check-once.js
 
       - name: Commit state if changed (force add + rebase autostash)
