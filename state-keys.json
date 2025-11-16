@@ -7,14 +7,14 @@
     "XRP:LONG"
   ],
   "sizes": {
-    "ASTER:SHORT": 2467458,
+    "ASTER:SHORT": 961749,
     "DOGE:SHORT": 35602838,
     "ETH:SHORT": 6000,
     "XRP:SHORT": 6610009,
     "KPEPE:SHORT": 1,
-    "ETH:LONG": 53000.19,
+    "ETH:LONG": 56000.19,
     "DOGE:LONG": 130566,
-    "XRP:LONG": 34712889
+    "XRP:LONG": 39274724
   },
   "lastHeartbeat": 1763272724434
 }
