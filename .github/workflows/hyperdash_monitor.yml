@@ -2,52 +2,24 @@ name: Hyperdash Monitor Final
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут (UTC)
-  workflow_dispatch:
+    - cron: "*/5 * * * *"        # каждые 5 минут
+  workflow_dispatch:            # запуск руками
 
 permissions:
   contents: write
 
+concurrency:
+  group: hyperdash-monitor
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Install system dependencies (Chromium & libs)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            chromium-browser \
-            libnss3 \
-            libxss1 \
-            libxrandr2 \
-            libatk1.0-0 \
-            libatk-bridge2.0-0 \
-            libcups2 \
-            libdrm2 \
-            libxkbcommon0 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxfixes3 \
-            libgbm1 \
-            libpango-1.0-0 \
-            libpangocairo-1.0-0 \
-            fonts-liberation \
-            libappindicator3-1 \
-            xdg-utils \
-            wget \
-            lsb-release || true
-          sudo apt-get install -y libasound2t64 || true
-          if [ ! -f /usr/bin/chromium-browser ] && [ -f /usr/bin/chromium ]; then
-            sudo ln -s /usr/bin/chromium /usr/bin/chromium-browser
-          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -55,55 +27,33 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install dependencies (robust)
-        env:
-          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-        run: |
-          echo "Node $(node -v), npm $(npm -v)"
-          if [ -f package-lock.json ]; then
-            echo "Trying: npm ci"
-            npm ci --no-audit --no-fund || (
-              echo "npm ci failed → fallback to npm install" &&
-              rm -f package-lock.json &&
-              npm install --no-audit --no-fund
-            )
-          else
-            echo "No lockfile → npm install"
-            npm install --no-audit --no-fund
-          fi
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
 
       - name: Run monitor script
         env:
           TRADER_URL: "https://hyperdash.info/trader/0x9eec98d048d06d9cd75318fffa3f3960e081daab"
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
-          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-          SIZE_TOL: "0.0"
-          SIZE_TOL_REL: "0.005"
-          HEARTBEAT_HOURS: "24"
+          # Чувствительность к изменению размера позиции (в монетах):
+          SIZE_TOL: "0"          # абсолютный порог (например 10 монет). 0 = выключен
+          SIZE_TOL_REL: "0.005"  # относительный порог (0.005 = 0.5%). 0 = выключен
+          HEARTBEAT_HOURS: "24"   # плановый отчёт раз в N часов
+          # НЕ задаём PUPPETEER_EXECUTABLE_PATH и PUPPETEER_SKIP_CHROMIUM_DOWNLOAD:
+          # Puppeteer сам скачает свой Chromium
         run: node check-once.js
 
       - name: Commit state if changed (force add + rebase autostash)
         run: |
-          set -e
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          CHANGED=0
-          for f in state-keys.json state.json last_positions.json snapshot.json; do
-            if [ -f "$f" ] ; then
-              git add -f "$f" || true
-              CHANGED=1
-            fi
-          done
-
-          if [ "$CHANGED" -eq 1 ]; then
-            git commit -m "Update positions snapshot [skip ci]" || true
-            git fetch origin main
-            git pull --rebase --autostash origin main
-            git push origin HEAD:main
+          git add -f state-keys.json || true
+          git fetch --depth=1 origin main || true
+          git -c pull.rebase=true -c rebase.autoStash=true pull --rebase origin main || true
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Update positions snapshot [skip ci]"
+            git push
           else
             echo "Nothing to commit."
           fi
+
