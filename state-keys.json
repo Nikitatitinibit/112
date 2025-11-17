@@ -1,0 +1,15 @@
+{
+  "keys": [
+    "DOGE:LONG",
+    "ETH:LONG",
+    "KPEPE:SHORT",
+    "XRP:LONG"
+  ],
+  "sizes": {
+    "ETH:LONG": 60000.84,
+    "XRP:LONG": 44317789,
+    "DOGE:LONG": 130566,
+    "KPEPE:SHORT": 1
+  },
+  "lastHeartbeat": 1763388890714
+}
