@@ -2,8 +2,8 @@ name: Hyperdash Monitor Final
 
 on:
   schedule:
-    - cron: "*/5 * * * *"        # каждые 5 минут
-  workflow_dispatch:            # ручной запуск
+    - cron: "*/5 * * * *"          # каждые 5 минут
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -45,33 +45,31 @@ jobs:
 
       - name: Run monitor script
         env:
-          # Можно переопределить в Secrets/Vars
           TRADER_URL: "https://hyperdash.info/trader/0x9eec98d048d06d9cd75318fffa3f3960e081daab"
-
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-          # Чувствительность к изменению размера позиции (в монетах)
-          SIZE_TOL: "0"          # абсолютный порог (например 10 монет). 0 = выключен
-          SIZE_TOL_REL: "0.005"  # относительный порог (0.005 = 0.5%). 0 = выключен
-
-          # Плановый отчёт
-          HEARTBEAT_HOURS: "24"   # шлём отчёт раз в N часов при любых обстоятельствах
-
-          # ВАЖНО: не задаём PUPPETEER_EXECUTABLE_PATH и PUPPETEER_SKIP_CHROMIUM_DOWNLOAD —
-          # Puppeteer сам скачает свой Chromium (быстрее и стабильнее, чем snap)
+          SIZE_TOL: "0"
+          SIZE_TOL_REL: "0.005"
+          HEARTBEAT_HOURS: "4"
         run: node check-once.js
 
-      - name: Commit state if changed (force add + rebase autostash)
+      # ✅ Коммитим ТОЛЬКО state-keys.json и ТОЛЬКО если он изменился
+      - name: Commit state if changed (only state file)
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
+          set -e
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f state-keys.json || true
-          git fetch --depth=1 origin main || true
-          git -c pull.rebase=true -c rebase.autoStash=true pull --rebase origin main || true
-          if [ -n "$(git status --porcelain)" ]; then
+
+          # есть ли изменения именно в state-keys.json?
+          CHANGED="$(git status --porcelain state-keys.json || true)"
+
+          if [ -n "$CHANGED" ]; then
+            echo "State changed, committing…"
+            git add -f state-keys.json
             git commit -m "Update positions snapshot [skip ci]"
             git push
           else
-            echo "Nothing to commit."
+            echo "No state changes — skip commit."
           fi
+
