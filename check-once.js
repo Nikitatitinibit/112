@@ -1,6 +1,7 @@
-// HyperDash -> Telegram (позиции: открытие/закрытие + изменение размера в монетах)
-// Плановый отчёт раз в HEARTBEAT_HOURS
-// Вариант без системного Chromium — Puppeteer сам скачивает свой бинарь
+// HyperDash -> Telegram
+// Отслеживаем открытие/закрытие позиций и изменение их размера в монетах.
+// + Плановый отчёт раз в HEARTBEAT_HOURS.
+// Вариант без системного Chromium — Puppeteer сам скачивает бинарь.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -16,7 +17,7 @@ const TELEGRAM_TOKEN =
   process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// Если вдруг зададут путь — используем, иначе дадим Puppeteer выбрать свой Chromium
+// Если явно указали путь — используем, иначе даём Puppeteer выбрать свой Chromium
 const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || null;
 
 // Пороги чувствительности
@@ -35,7 +36,7 @@ const fmt = (n, p = 2) =>
 async function sendTelegram(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  const MAX = 3900; // запас по лимиту 4096
+  const MAX = 3900; // запас под лимит 4096
   for (let i = 0; i < text.length; i += MAX) {
     const chunk = text.slice(i, i + MAX);
     const body = new URLSearchParams({
@@ -76,7 +77,7 @@ function changedEnough(oldV, newV) {
   return (SIZE_TOL === 0 && SIZE_TOL_REL === 0) ? abs > 0 : false;
 }
 
-// -------- Снятие позиций
+// ------ снятие текущих позиций
 async function getPositions(browser) {
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -96,7 +97,7 @@ async function getPositions(browser) {
          getComputedStyle(el).visibility !== "hidden" &&
          getComputedStyle(el).display !== "none");
 
-    // Ищем таблицу с позициями
+    // Ищем видимую таблицу с позициями
     const containers = Array.from(document.querySelectorAll("section,div"));
     const posRoot =
       containers.find(el => /asset positions/i.test((el.innerText || ""))) ||
@@ -116,7 +117,7 @@ async function getPositions(browser) {
       const side = (t1.match(/\b(LONG|SHORT)\b/) || [,""])[1];
       if (!side) continue;
 
-      // В третьей колонке ищем "xxx SYMBOL" без $
+      // В третьей колонке ищем строку "XXX SYMBOL" без $
       const raw2 = clean(cells[2].innerText || "");
       const lines = raw2.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
       let sizeLine = lines.find(s => s.toUpperCase().includes(symbol) && !s.includes("$"));
@@ -141,7 +142,7 @@ async function getPositions(browser) {
   return positions;
 }
 
-// -------- Основной запуск
+// ------ основной запуск
 (async () => {
   const launchOpts = {
     headless: true,
@@ -257,5 +258,4 @@ async function getPositions(browser) {
     await browser.close();
   }
 })();
-
 
