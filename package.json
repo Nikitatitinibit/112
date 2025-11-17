@@ -1,12 +1,13 @@
-
 {
   "name": "hyperdash-monitor",
-  "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "version": "1.0.0",
+  "license": "MIT",
   "scripts": {
-    "check": "node check-once.js"
+    "start": "node check-once.js"
   },
   "dependencies": {
-    "puppeteer": "^22.15.0"
+    "puppeteer": "^22.11.0"
   }
 }
