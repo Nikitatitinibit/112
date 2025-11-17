@@ -3,7 +3,7 @@ name: Hyperdash Monitor Final
 on:
   schedule:
     - cron: "*/5 * * * *"        # каждые 5 минут
-  workflow_dispatch:            # запуск руками
+  workflow_dispatch:            # ручной запуск
 
 permissions:
   contents: write
@@ -27,20 +27,39 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+      # Робастная установка зависимостей: сначала npm ci, при сбое — npm install
+      - name: Install dependencies (robust)
+        run: |
+          echo "Node $(node -v), npm $(npm -v)"
+          if [ -f package-lock.json ]; then
+            echo "Trying: npm ci"
+            npm ci --no-audit --no-fund || (
+              echo "npm ci failed → fallback to npm install" &&
+              rm -f package-lock.json &&
+              npm install --no-audit --no-fund
+            )
+          else
+            echo "No lockfile → npm install"
+            npm install --no-audit --no-fund
+          fi
 
       - name: Run monitor script
         env:
+          # Можно переопределить в Secrets/Vars
           TRADER_URL: "https://hyperdash.info/trader/0x9eec98d048d06d9cd75318fffa3f3960e081daab"
+
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Чувствительность к изменению размера позиции (в монетах):
+
+          # Чувствительность к изменению размера позиции (в монетах)
           SIZE_TOL: "0"          # абсолютный порог (например 10 монет). 0 = выключен
           SIZE_TOL_REL: "0.005"  # относительный порог (0.005 = 0.5%). 0 = выключен
-          HEARTBEAT_HOURS: "24"   # плановый отчёт раз в N часов
-          # НЕ задаём PUPPETEER_EXECUTABLE_PATH и PUPPETEER_SKIP_CHROMIUM_DOWNLOAD:
-          # Puppeteer сам скачает свой Chromium
+
+          # Плановый отчёт
+          HEARTBEAT_HOURS: "4"   # шлём отчёт раз в N часов при любых обстоятельствах
+
+          # ВАЖНО: не задаём PUPPETEER_EXECUTABLE_PATH и PUPPETEER_SKIP_CHROMIUM_DOWNLOAD —
+          # Puppeteer сам скачает свой Chromium (быстрее и стабильнее, чем snap)
         run: node check-once.js
 
       - name: Commit state if changed (force add + rebase autostash)
@@ -56,4 +75,3 @@ jobs:
           else
             echo "Nothing to commit."
           fi
-
