@@ -1,6 +1,6 @@
-// HyperDash -> Telegram (только позиции)
-// События: открытие/закрытие позиций и изменение размера (в монетах)
+// HyperDash -> Telegram (позиции: открытие/закрытие + изменение размера в монетах)
 // Плановый отчёт раз в HEARTBEAT_HOURS
+// Вариант без системного Chromium — Puppeteer сам скачивает свой бинарь
 
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -15,13 +15,13 @@ const STATE_FILE = path.join(process.cwd(), "state-keys.json");
 const TELEGRAM_TOKEN =
   process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const EXEC_PATH =
-  process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 
-// Порог чувствительности (абс./отн.) для «изменения размера»
-const SIZE_TOL = parseFloat(process.env.SIZE_TOL || "0");         // напр. 10 (монет)
-const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0"); // напр. 0.01 (1%)
+// Если вдруг зададут путь — используем, иначе дадим Puppeteer выбрать свой Chromium
+const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || null;
 
+// Пороги чувствительности
+const SIZE_TOL = parseFloat(process.env.SIZE_TOL || "0");        // абсолютный (в монетах)
+const SIZE_TOL_REL = parseFloat(process.env.SIZE_TOL_REL || "0");// относительный (доля)
 const HEARTBEAT_HOURS = parseFloat(process.env.HEARTBEAT_HOURS || "4");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -35,7 +35,7 @@ const fmt = (n, p = 2) =>
 async function sendTelegram(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  const MAX = 3900;
+  const MAX = 3900; // запас по лимиту 4096
   for (let i = 0; i < text.length; i += MAX) {
     const chunk = text.slice(i, i + MAX);
     const body = new URLSearchParams({
@@ -44,8 +44,7 @@ async function sendTelegram(text) {
       disable_web_page_preview: "true",
     });
     const res = await fetch(url, { method: "POST", body });
-    const txt = await res.text();
-    if (!res.ok) throw new Error(`Telegram ${res.status}: ${txt}`);
+    if (!res.ok) throw new Error(`Telegram ${res.status}: ${await res.text()}`);
   }
 }
 
@@ -77,7 +76,7 @@ function changedEnough(oldV, newV) {
   return (SIZE_TOL === 0 && SIZE_TOL_REL === 0) ? abs > 0 : false;
 }
 
-// ── Парсинг позиций
+// -------- Снятие позиций
 async function getPositions(browser) {
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -85,7 +84,7 @@ async function getPositions(browser) {
   );
   await page.setViewport({ width: 1440, height: 1000 });
   await page.goto(TRADER_URL, { waitUntil: "networkidle2", timeout: 120000 });
-  await sleep(2500);
+  await sleep(2500); // даём SPA дорендериться
 
   const positions = await page.evaluate(() => {
     const NBSP_ALL = /[\u00A0\u202F\u2000-\u200B]/g;
@@ -97,10 +96,10 @@ async function getPositions(browser) {
          getComputedStyle(el).visibility !== "hidden" &&
          getComputedStyle(el).display !== "none");
 
-    // Ищем контейнер таблицы позиций; если не нашли — работаем от body
+    // Ищем таблицу с позициями
     const containers = Array.from(document.querySelectorAll("section,div"));
     const posRoot =
-      containers.find(el => /asset positions/i.test(el.innerText || "")) ||
+      containers.find(el => /asset positions/i.test((el.innerText || ""))) ||
       document.body;
 
     const rows = Array.from(posRoot.querySelectorAll("tr,[role='row']"))
@@ -117,7 +116,7 @@ async function getPositions(browser) {
       const side = (t1.match(/\b(LONG|SHORT)\b/) || [,""])[1];
       if (!side) continue;
 
-      // В третьей колонке ищем строку "<число> SYMBOL" без доллара
+      // В третьей колонке ищем "xxx SYMBOL" без $
       const raw2 = clean(cells[2].innerText || "");
       const lines = raw2.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
       let sizeLine = lines.find(s => s.toUpperCase().includes(symbol) && !s.includes("$"));
@@ -142,11 +141,10 @@ async function getPositions(browser) {
   return positions;
 }
 
-// ── Основной цикл
+// -------- Основной запуск
 (async () => {
-  const browser = await puppeteer.launch({
+  const launchOpts = {
     headless: true,
-    executablePath: EXEC_PATH,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -154,7 +152,10 @@ async function getPositions(browser) {
       "--single-process",
       "--no-zygote",
     ],
-  });
+  };
+  if (EXEC_PATH) launchOpts.executablePath = EXEC_PATH;
+
+  const browser = await puppeteer.launch(launchOpts);
 
   try {
     const prev = loadState();
@@ -238,7 +239,7 @@ async function getPositions(browser) {
       console.log("No changes.");
     }
 
-    // сохраняем размеры и последнее время отчёта
+    // сохраняем состояние
     const sizes = { ...(prev.sizes || {}) };
     for (const p of currPos) if (p.sizeCoin != null) sizes[p.key] = p.sizeCoin;
 
