@@ -1,10 +1,5 @@
 {
-  "keys": [
-    "DOGE:LONG",
-    "ETH:LONG",
-    "KPEPE:SHORT",
-    "XRP:LONG"
-  ],
+  "keys": [],
   "sizes": {
     "ETH:LONG": 61000.84,
     "XRP:LONG": 44317789,
