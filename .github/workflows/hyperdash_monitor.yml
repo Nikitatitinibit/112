@@ -1,8 +1,8 @@
-name: Hyperdash Monitor Final
+nname: Hyperdash Monitor Final
 
 on:
   schedule:
-    - cron: "*/5 * * * *"          # каждые 5 минут
+    - cron: "*/5 * * * *"      # каждые 5 минут
   workflow_dispatch:
 
 permissions:
@@ -25,21 +25,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: npm
 
-      # Робастная установка зависимостей: сначала npm ci, при сбое — npm install
       - name: Install dependencies (robust)
         run: |
           echo "Node $(node -v), npm $(npm -v)"
           if [ -f package-lock.json ]; then
-            echo "Trying: npm ci"
             npm ci --no-audit --no-fund || (
               echo "npm ci failed → fallback to npm install" &&
               rm -f package-lock.json &&
               npm install --no-audit --no-fund
             )
           else
-            echo "No lockfile → npm install"
             npm install --no-audit --no-fund
           fi
 
@@ -53,23 +50,17 @@ jobs:
           HEARTBEAT_HOURS: "24"
         run: node check-once.js
 
-      # ✅ Коммитим ТОЛЬКО state-keys.json и ТОЛЬКО если он изменился
       - name: Commit state if changed (only state file)
         shell: bash
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # есть ли изменения именно в state-keys.json?
           CHANGED="$(git status --porcelain state-keys.json || true)"
-
           if [ -n "$CHANGED" ]; then
-            echo "State changed, committing…"
             git add -f state-keys.json
             git commit -m "Update positions snapshot [skip ci]"
             git push
           else
             echo "No state changes — skip commit."
           fi
-
