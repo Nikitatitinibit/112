@@ -1,4 +1,11 @@
 {
-  "keys": {},
-  "lastHeartbeat": 0
+  "keys": {
+    "ETH 15x LONG": {
+      "size": 52353.96
+    },
+    "XRP 10x LONG": {
+      "size": 38829121
+    }
+  },
+  "lastHeartbeat": 1763826656864
 }
