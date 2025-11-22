@@ -2,7 +2,7 @@ name: Hyperdash Monitor Final
 
 on:
   schedule:
-    - cron: "*/5 * * * *"          # каждые 5 минут
+    - cron: "*/5 * * * *"            # каждые 5 минут
   workflow_dispatch:
 
 permissions:
@@ -25,8 +25,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: npm
 
+      # робастная установка зависимостей
       - name: Install dependencies (robust)
         run: |
           echo "Node $(node -v), npm $(npm -v)"
@@ -42,25 +43,31 @@ jobs:
             npm install --no-audit --no-fund
           fi
 
+      # гарантируем существование state-keys.json (пустой старт)
+      - name: Ensure state file exists
+        run: |
+          if [ ! -f state-keys.json ]; then
+            echo '{"keys":{},"lastHeartbeat":0}' > state-keys.json
+          fi
+
       - name: Run monitor script
         env:
           TRADER_URL: "https://hyperdash.info/trader/0x9eec98d048d06d9cd75318fffa3f3960e081daab"
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SIZE_TOL: "0"
-          SIZE_TOL_REL: "0.005"
-          HEARTBEAT_HOURS: "0.05"
+          SIZE_TOL: "0"           # абсолютный порог изменения размера (штук)
+          SIZE_TOL_REL: "0.005"   # относительный порог (0.5%)
+          HEARTBEAT_HOURS: "24"   # раз в 24ч присылать сводку
         run: node check-once.js
 
+      # коммитим только state-keys.json и только при изменении
       - name: Commit state if changed (only state file)
         shell: bash
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          CHANGED="$(git status --porcelain state-keys.json || true)"
-          if [ -n "$CHANGED" ]; then
+          if ! git diff --quiet -- state-keys.json; then
             echo "State changed, committing…"
             git add -f state-keys.json
             git commit -m "Update positions snapshot [skip ci]"
