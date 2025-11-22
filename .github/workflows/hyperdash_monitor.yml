@@ -49,7 +49,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SIZE_TOL: "0"
           SIZE_TOL_REL: "0.005"
-          HEARTBEAT_HOURS: "24"
+          HEARTBEAT_HOURS: "0.05"
         run: node check-once.js
 
       - name: Commit state if changed (only state file)
