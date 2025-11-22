@@ -2,7 +2,7 @@ name: Hyperdash Monitor Final
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут
+    - cron: "*/5 * * * *"        # каждые 5 минут
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -31,8 +31,14 @@ jobs:
         run: |
           echo "Node $(node -v), npm $(npm -v)"
           if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund || (rm -f package-lock.json && npm install --no-audit --no-fund)
+            echo "Trying: npm ci"
+            npm ci --no-audit --no-fund || (
+              echo "npm ci failed → fallback to npm install" &&
+              rm -f package-lock.json &&
+              npm install --no-audit --no-fund
+            )
           else
+            echo "No lockfile → npm install"
             npm install --no-audit --no-fund
           fi
 
@@ -58,11 +64,12 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet -- state-keys.json; then
+          CHANGED="$(git status --porcelain state-keys.json || true)"
+          if [ -n "$CHANGED" ]; then
+            echo "State changed, committing…"
             git add -f state-keys.json
             git commit -m "Update positions snapshot [skip ci]"
             git push
           else
             echo "No state changes — skip commit."
           fi
-
