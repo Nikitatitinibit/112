@@ -1,21 +1,27 @@
-// check-once.js — монитор Hyperdash → Telegram (устойчивое ожидание таблицы + размер в монетах)
+// check-once.js — монитор Hyperdash → Telegram (мульти трейдеры + размеры в монетах)
 
 import fs from "fs";
 import path from "path";
 import puppeteer from "puppeteer";
 
-const TRADER_URL =
-  process.env.TRADER_URL ||
-  "https://hyperdash.info/trader/0x9eec98d048d06d9cd75318fffa3f3960e081daab";
-const STATE_FILE = path.join(process.cwd(), "state-keys.json");
-
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// чувствительность: абсолютная и относительная (доли) — считаем изменением размера
-const SIZE_TOL = Number(process.env.SIZE_TOL || 0); // абс. шаг
+const SIZE_TOL = Number(process.env.SIZE_TOL || 0);            // абс. шаг
 const SIZE_TOL_REL = Number(process.env.SIZE_TOL_REL || 0.005); // 0.5%
 const HEARTBEAT_HOURS = Number(process.env.HEARTBEAT_HOURS || 24);
+
+// список трейдеров из env (JSON)
+let TRADERS = [];
+try {
+  TRADERS = JSON.parse(process.env.TRADERS || "[]");
+} catch (_) {
+  TRADERS = [];
+}
+// обратная совместимость: если вдруг задан один URL
+if (!TRADERS.length && process.env.TRADER_URL) {
+  TRADERS = [{ label: "Main", url: process.env.TRADER_URL }];
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -37,147 +43,118 @@ async function sendTelegram(text) {
   }
 }
 
-function loadState() {
+function stateFile(label) {
+  const safe = label.replace(/[^\w.-]+/g, "_");
+  return path.join(process.cwd(), `state-keys-${safe}.json`);
+}
+
+function loadState(label) {
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    return JSON.parse(fs.readFileSync(stateFile(label), "utf8"));
   } catch {
     return { keys: {}, lastHeartbeat: 0 };
   }
 }
-function saveState(s) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
+function saveState(label, s) {
+  fs.writeFileSync(stateFile(label), JSON.stringify(s, null, 2));
 }
 
 function fmtNum(n, digits = 2) {
   return Number(n).toLocaleString("en-US", { maximumFractionDigits: digits });
 }
+
 const keyOf = (p) => `${p.asset} ${p.side}`;
 
-// ждём «что-то похожее на таблицу с позициями»: настоящая таблица, грид-строки, списки
-async function waitPositionsArea(page, totalMs = 90000) {
-  const start = Date.now();
-  let round = 0;
+// ждём появления таблицы с позициями
+async function waitPositionsTable(page, url) {
+  // основная загрузка
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
 
-  while (Date.now() - start < totalMs) {
-    round++;
-    // чуть подождать сети
-    await page.waitForNetworkIdle({ idleTime: 1000, timeout: 15000 }).catch(() => {});
+  // небольшой прогрев — прокрутки
+  await sleep(1200);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await sleep(1200);
+  await page.evaluate(() => window.scrollTo(0, 0));
 
-    // лёгкий скролл туда-сюда, чтобы триггернуть ленивый рендер
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await sleep(700);
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await sleep(500);
-
-    // Переключить Perpetual (если кнопка есть)
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll("button, a, div, span"))
-        .find(n => /perpetual/i.test(n.textContent || ""));
-      if (btn) btn.click();
-    });
-
-    // Открыть вкладку «Asset Positions» (или похожее)
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll("button, a, div, span"))
-        .find(n => /asset positions|positions/i.test(n.textContent || ""));
-      if (btn) btn.click();
-    });
-
-    // Проверяем наличие хоть каких-то строк
-    const found = await page.evaluate(() => {
-      const q = (sel) => Array.from(document.querySelectorAll(sel));
-      // таблица
-      const hasTableRows = q("table tbody tr").length >= 1;
-      // грид / div-строки
-      const hasRoleRows = q('[role="row"]').length >= 2;
-      // резерв: списки/карточки
-      const hasGenericRows =
-        q(".row").length >= 2 || q(".trade-row").length >= 2 || q("li").length >= 5;
-
-      return hasTableRows || hasRoleRows || hasGenericRows;
-    });
-
-    if (found) return true;
-
-    // ещё чуть подождать и попробовать снова
-    await sleep(1500);
-  }
-
-  return false;
-}
-
-// вынимаем список позиций: [{asset, side, size, sizeStr}]
-async function grabPositions(page) {
-  const rows = await page.evaluate(() => {
-    const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-
-    function collectFromNodeList(list) {
-      const out = [];
-      for (const node of list) {
-        const txt = norm(node.innerText || "");
-        if (!txt) continue;
-
-        // side
-        const side = /short/i.test(txt) ? "SHORT" : "LONG";
-
-        // попробовать взять asset из первой ячейки, если это таблица
-        let asset = "";
-        if (node.querySelectorAll) {
-          const firstCellText = norm(node.querySelector("td, [role='cell']")?.innerText || "");
-          if (firstCellText) asset = firstCellText.split(/\n/)[0].trim();
-        }
-
-        // если тикер не нашли — возьмём наиболее вероятный UPPERCASE-токен
-        if (!asset) {
-          const tick = txt.match(/\b[A-Z]{2,6}\b/g);
-          // фильтруем слова типа LONG/SHORT/UPNL/PNL
-          const ticker = (tick || []).find(t => !/LONG|SHORT|UPNL|PNL|MARGIN|PRICE|VALUE|SIZE/i.test(t));
-          if (ticker) asset = ticker;
-        }
-
-        // размер: "<число> <тикер>"
-        let size = 0;
-        let sizeStr = "";
-        if (asset) {
-          const m = txt.match(new RegExp(`([\\d,]+(?:\\.\\d+)?)\\s*${asset}\\b`, "i"));
-          if (m) {
-            size = Number(m[1].replace(/,/g, ""));
-            sizeStr = `${m[1]} ${asset}`;
-          }
-        }
-        // fallback: первая пара «число + UPPER»
-        if (!size) {
-          const m2 = txt.match(/([\d,]+(?:\.\d+)?)\s*([A-Z]{2,6})\b/);
-          if (m2) {
-            size = Number(m2[1].replace(/,/g, ""));
-            sizeStr = `${m2[1]} ${m2[2]}`;
-            if (!asset) asset = m2[2];
-          }
-        }
-
-        if (asset && size > 0) out.push({ asset, side, size, sizeStr });
-      }
-      return out;
-    }
-
-    // кандидаты: таблицы, грид-строки и generic-элементы
-    const tables = Array.from(document.querySelectorAll("table tbody tr"));
-    const roleRows = Array.from(document.querySelectorAll('[role="row"]')).slice(1); // пропустим заголовок
-    const generic = Array.from(document.querySelectorAll(".row, .trade-row, li"));
-
-    const all = [
-      ...collectFromNodeList(tables),
-      ...collectFromNodeList(roleRows),
-      ...collectFromNodeList(generic),
-    ];
-
-    // уникализируем по "asset side"
-    const uniq = new Map();
-    for (const p of all) uniq.set(`${p.asset} ${p.side}`, p);
-    return [...uniq.values()];
+  // кликаем Perpetual, если есть
+  await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button, div, a, span"));
+    const perp = btns.find((b) => /perpetual/i.test(b.textContent || ""));
+    if (perp) perp.click();
   });
 
-  return rows;
+  // ждём таблицу с заголовками
+  await page.waitForFunction(
+    () => {
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+      const tables = Array.from(document.querySelectorAll("table"));
+      return tables.some((t) => {
+        const headers = Array.from(t.querySelectorAll("th")).map((th) =>
+          norm(th.innerText)
+        );
+        return headers.includes("asset") && headers.some((h) => h.includes("position value"));
+      });
+    },
+    { timeout: 45000 }
+  );
+}
+
+// парсинг позиций: [{asset, side, size, sizeStr}]
+async function grabPositions(page) {
+  const rows = await page.evaluate(() => {
+    function norm(s) {
+      return (s || "").replace(/\s+/g, " ").trim();
+    }
+
+    const tables = Array.from(document.querySelectorAll("table"));
+    const table = tables.find((t) => {
+      const headers = Array.from(t.querySelectorAll("th")).map((th) =>
+        norm(th.innerText).toLowerCase()
+      );
+      return headers.includes("asset") && headers.some((h) => h.includes("position value"));
+    });
+    if (!table) return [];
+
+    const trs = Array.from(table.querySelectorAll("tbody tr"));
+    return trs
+      .map((tr) => {
+        const tds = Array.from(tr.querySelectorAll("td"));
+        const rowText = norm(tr.innerText);
+
+        // Asset — первая ячейка, обычно "ETH\n15x"
+        let assetCell = norm(tds[0]?.innerText || "");
+        let asset = assetCell.split(/\n/)[0].trim();
+
+        // LONG / SHORT
+        const side = /short/i.test(rowText) ? "SHORT" : "LONG";
+
+        // Ищем "123,456.78 ETH" и т.п.
+        let sizeStr = "";
+        let size = 0;
+        const re = new RegExp(`([\\d,]+(?:\\.\\d+)?)\\s*${asset}\\b`, "i");
+        const m = rowText.match(re);
+        if (m) {
+          sizeStr = `${m[1]} ${asset}`;
+          size = Number(m[1].replace(/,/g, ""));
+        } else {
+          // запасной вариант — первый "число + ТИКЕР"
+          const m2 = rowText.match(/([\d,]+(?:\.\d+)?)\s*([A-Z]{2,})\b/);
+          if (m2) {
+            sizeStr = `${m2[1]} ${m2[2]}`;
+            size = Number(m2[1].replace(/,/g, ""));
+            asset = m2[2];
+          }
+        }
+
+        return { asset, side, size, sizeStr };
+      })
+      .filter((p) => p.asset && p.size > 0);
+  });
+
+  // убираем дубли
+  const uniq = new Map();
+  for (const p of rows) uniq.set(keyOf(p), p);
+  return [...uniq.values()];
 }
 
 function diffPositions(prevKeys, cur) {
@@ -219,85 +196,87 @@ function renderList(title, arr) {
   });
 
   try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
-    );
-    await page.setViewport({ width: 1366, height: 900 });
-
-    await page.goto(TRADER_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-
-    const ok = await waitPositionsArea(page, 90000);
-
-    if (!ok) {
-      await sendTelegram(
-        `HyperDash монитор\n${TRADER_URL}\n\nНе удалось дождаться таблицы позиций за отведённое время.`
+    for (const { label, url } of TRADERS) {
+      const page = await browser.newPage();
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
       );
-      return;
-    }
+      await page.setViewport({ width: 1366, height: 900 });
 
-    const curPositions = await grabPositions(page); // [{asset, side, size, sizeStr}]
-    const state = loadState(); // {keys: { "ETH LONG": {size} }, lastHeartbeat}
-    const prevKeys = state.keys || {};
+      let curPositions = [];
+      try {
+        await waitPositionsTable(page, url);
+        curPositions = await grabPositions(page); // [{asset, side, size, sizeStr}]
+      } catch (e) {
+        await sendTelegram(
+          `*${label}* • HyperDash монитор\n${url}\n\nНе удалось дождаться таблицы позиций за отведённое время.`
+        );
+        await page.close();
+        continue;
+      }
 
-    const { added, removed, sizeChanged } = diffPositions(prevKeys, curPositions);
+      const state = loadState(label); // {keys, lastHeartbeat}
+      const prevKeys = state.keys || {};
+      const { added, removed, sizeChanged } = diffPositions(prevKeys, curPositions);
 
-    const blocks = [];
+      const blocks = [];
 
-    if (added.length) {
-      const lines = added.map((k) => {
-        const p = curPositions.find((x) => keyOf(x) === k);
-        return `${p.asset} ${p.side} — ${p.sizeStr}`;
-      });
-      blocks.push(renderList("*Открыты позиции*:", lines));
-    }
-
-    if (removed.length) {
-      const lines = removed.map((k) => {
-        const prev = prevKeys[k];
-        const [asset, side] = k.split(" ");
-        const wasStr = prev?.size ? `${fmtNum(prev.size)} ${asset}` : `${asset}`;
-        return `${asset} ${side} — было ${wasStr}`;
-      });
-      blocks.push(renderList("*Закрыты позиции*:", lines));
-    }
-
-    if (sizeChanged.length) {
-      const lines = sizeChanged.map(
-        ({ p, prevSize, curSize }) =>
+      if (added.length) {
+        const lines = added.map((k) => {
+          const p = curPositions.find((x) => keyOf(x) === k);
+          return `${p.asset} ${p.side} — ${p.sizeStr}`;
+        });
+        blocks.push(renderList("*Открыты позиции*:", lines));
+      }
+      if (removed.length) {
+        const lines = removed.map((k) => {
+          const prev = prevKeys[k];
+          const [asset, side] = k.split(" ");
+          const wasStr = prev?.size ? `${fmtNum(prev.size)} ${asset}` : `${asset}`;
+          return `${asset} ${side} — было ${wasStr}`;
+        });
+        blocks.push(renderList("*Закрыты позиции*:", lines));
+      }
+      if (sizeChanged.length) {
+        const lines = sizeChanged.map(({ p, prevSize, curSize }) =>
           `${p.asset} ${p.side} — было ${fmtNum(prevSize)} ${p.asset}, стало ${fmtNum(
             curSize
           )} ${p.asset}`
-      );
-      blocks.push(renderList("*Изменение размера позиций*:", lines));
+        );
+        blocks.push(renderList("*Изменение размера позиций*:", lines));
+      }
+
+      if (blocks.length) {
+        await sendTelegram(`*${label}* • HyperDash монитор\n${url}\n\n${blocks.join("\n\n")}`);
+      }
+
+      const now = Date.now();
+      const needHeartbeat =
+        !state.lastHeartbeat || now - state.lastHeartbeat > HEARTBEAT_HOURS * 3600 * 1000;
+      if (needHeartbeat) {
+        const lines = curPositions.map((p) => `• ${p.asset} ${p.side} — ${p.sizeStr}`);
+        const report = lines.length ? lines.join("\n") : "—";
+        await sendTelegram(
+          `*${label}* • HyperDash монитор\n${url}\n\n⏰ Плановый отчёт (каждые ${HEARTBEAT_HOURS}ч)\nТекущие позиции (${curPositions.length}):\n${report}`
+        );
+        state.lastHeartbeat = now;
+      }
+
+      const nextKeys = {};
+      for (const p of curPositions) nextKeys[keyOf(p)] = { size: p.size };
+      state.keys = nextKeys;
+      saveState(label, state);
+
+      await page.close();
     }
-
-    if (blocks.length) {
-      await sendTelegram(`HyperDash монитор\n${TRADER_URL}\n\n${blocks.join("\n\n")}`);
-    }
-
-    // Плановый отчёт раз в N часов
-    const now = Date.now();
-    const needHeartbeat =
-      !state.lastHeartbeat || now - state.lastHeartbeat > HEARTBEAT_HOURS * 3600 * 1000;
-
-    if (needHeartbeat) {
-      const lines = curPositions.map((p) => `• ${p.asset} ${p.side} — ${p.sizeStr}`);
-      const report = lines.length ? lines.join("\n") : "—";
-      await sendTelegram(
-        `HyperDash монитор\n${TRADER_URL}\n\n⏰ Плановый отчёт (каждые ${HEARTBEAT_HOURS}ч)\nТекущие позиции (${curPositions.length}):\n${report}`
-      );
-      state.lastHeartbeat = now;
-    }
-
-    // сохраняем новое состояние
-    const nextKeys = {};
-    for (const p of curPositions) nextKeys[keyOf(p)] = { size: p.size };
-    state.keys = nextKeys;
-    saveState(state);
   } catch (e) {
-    console.error("Error:", e);
+    console.error("Global error:", e);
   } finally {
-    await browser.close();
+    // закрываем браузер гарантированно
+    try {
+      await sleep(200);
+      await (await puppeteer.connect).close?.();
+    } catch {}
+    process.exit(0);
   }
 })();
