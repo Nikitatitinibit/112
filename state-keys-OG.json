@@ -1,4 +1,8 @@
 {
-  "keys": {},
+  "keys": {
+    "ETH SHORT": {
+      "size": 5000
+    }
+  },
   "lastHeartbeat": 1764392770431
 }
