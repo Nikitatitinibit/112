@@ -2,6 +2,9 @@
   "keys": {
     "ETH LONG": {
       "size": 140094.52
+    },
+    "BTC LONG": {
+      "size": 600
     }
   },
   "lastHeartbeat": 1765438039936
