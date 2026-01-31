@@ -1,14 +1,4 @@
 {
-  "keys": {
-    "ETH LONG": {
-      "size": 188086.52
-    },
-    "SOL LONG": {
-      "size": 511612.85
-    },
-    "BTC LONG": {
-      "size": 572.7113
-    }
-  },
+  "keys": {},
   "lastHeartbeat": 1769878903334
 }
